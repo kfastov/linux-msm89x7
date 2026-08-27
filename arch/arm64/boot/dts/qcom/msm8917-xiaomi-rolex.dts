@@ -12,6 +12,45 @@
 	compatible = "xiaomi,rolex", "qcom,msm8917";
 
 	qcom,board-id = <0x1000b 1>;
+
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <3030000>;
+		energy-full-design-microwatt-hours = <11665000>;
+		constant-charge-current-max-microamp = <1500000>;
+		constant-charge-voltage-max-microvolt = <4400000>;
+		precharge-current-microamp = <250000>;
+		charge-term-current-microamp = <150000>;
+		voltage-min-design-microvolt = <3400000>;
+	};
+};
+
+&blsp2_i2c1 {
+	status = "okay";
+
+	charger: charger@57 {
+		compatible = "summit,smb358";
+		reg = <0x57>;
+
+		interrupts-extended = <&tlmm 61 IRQ_TYPE_EDGE_FALLING>;
+
+		monitored-battery = <&battery>;
+
+		summit,enable-usb-charging;
+		summit,enable-charge-control = <0>;
+		summit,usb-current-limit-microamp = <1500000>;
+		summit,chip-temperature-threshold-celsius = <120>;
+	};
+
+	fuel-gauge@62 {
+		compatible = "cellwise,cw2015";
+		reg = <0x62>;
+
+		cellwise,monitor-interval-ms = <5000>;
+
+		monitored-battery = <&battery>;
+		power-supplies = <&charger>;
+	};
 };
 
 &camss {
