@@ -82,6 +82,8 @@
 };
 
 &tlmm {
+	gpio-reserved-ranges = <0 4>, <20 4>;
+
 	cam_sensor_front_default: cam-sensor-front-default-state {
 		pins = "gpio39", "gpio40";
 		function = "gpio";
