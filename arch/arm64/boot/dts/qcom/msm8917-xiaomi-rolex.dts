@@ -136,6 +136,14 @@
 	status = "okay";
 
 	/*
+	 * The wingtech dtsi asks for a level trigger, which makes the threaded
+	 * handler re-read the controller about three times per delivered
+	 * report for as long as a finger is down. The controller pulses the
+	 * line, so an edge is what this wants.
+	 */
+	interrupts-extended = <&tlmm 65 IRQ_TYPE_EDGE_FALLING>;
+
+	/*
 	 * The capacitive keys are part of the touch panel and are reported as
 	 * touches at y = 2000, well outside the 720x1280 display area. The
 	 * values come from the downstream device tree, which describes them
