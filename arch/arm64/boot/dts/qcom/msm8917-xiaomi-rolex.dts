@@ -133,6 +133,16 @@
 
 &edt_ft5306 {
 	status = "okay";
+
+	/*
+	 * The capacitive keys are part of the touch panel and are reported as
+	 * touches at y = 2000, well outside the 720x1280 display area. The
+	 * values come from the downstream device tree, which describes them
+	 * as ftech,virtual-key<n> = <keycode x y>.
+	 */
+	touchscreen-key-y = <2000>;
+	touchscreen-key-x = <140 360 580>;
+	linux,keycodes = <KEY_MENU KEY_HOMEPAGE KEY_BACK>;
 };
 
 /delete-node/ &goodix_gt911;
