@@ -5,6 +5,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/leds/common.h>
 #include "msm8917-xiaomi-wingtech.dtsi"
 
 / {
@@ -146,3 +147,41 @@
 };
 
 /delete-node/ &goodix_gt911;
+
+&blsp1_i2c2 {
+	/*
+	 * RGB notification LED, on the same bus as the LCD bias regulator.
+	 * Downstream describes it as aw2013@45 with red, green and blue
+	 * channels and rgb_led-supply = <&pm8917_l10>.
+	 */
+	led-controller@45 {
+		compatible = "awinic,aw2013";
+		reg = <0x45>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		vcc-supply = <&pm8937_l10>;
+		vio-supply = <&pm8937_l5>;
+
+		led@0 {
+			reg = <0>;
+			function = LED_FUNCTION_STATUS;
+			led-max-microamp = <5000>;
+			color = <LED_COLOR_ID_RED>;
+		};
+
+		led@1 {
+			reg = <1>;
+			function = LED_FUNCTION_STATUS;
+			led-max-microamp = <5000>;
+			color = <LED_COLOR_ID_GREEN>;
+		};
+
+		led@2 {
+			reg = <2>;
+			function = LED_FUNCTION_STATUS;
+			led-max-microamp = <5000>;
+			color = <LED_COLOR_ID_BLUE>;
+		};
+	};
+};
