@@ -34,6 +34,7 @@
 #define WCN36XX_AGGR_BUFFER_SIZE 64
 
 extern unsigned int wcn36xx_dbg_mask;
+extern bool wcn36xx_defer_peer_ht;
 
 enum wcn36xx_debug_mask {
 	WCN36XX_DBG_DXE		= 0x00000001,

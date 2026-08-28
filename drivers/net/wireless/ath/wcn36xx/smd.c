@@ -222,10 +222,42 @@ static inline u8 is_cap_supported(unsigned long caps, unsigned long flag)
 	return caps & flag ? 1 : 0;
 }
 
+/*
+ * Whether the peer may be told it is HT capable yet.
+ *
+ * On WCN3620 firmware an HT peer never receives unencrypted data frames, so a
+ * peer configured with ht_capable = 1 at association time swallows EAPOL
+ * message 2 of the 4-way handshake and the AP times out.  Hold HT back until
+ * the pairwise key has been installed; mac80211 is not touched, so the station
+ * still advertises HT and NetworkManager needs no special configuration.
+ *
+ * There is no such window on an open BSS, so HT is configured immediately
+ * there.  The privacy bit comes from the association response, which has
+ * already been received by the time a peer is configured.
+ */
+static bool wcn36xx_peer_ht_allowed(struct ieee80211_vif *vif,
+				    struct ieee80211_sta *sta)
+{
+	struct wcn36xx_sta *sta_priv;
+
+	if (!wcn36xx_defer_peer_ht)
+		return true;
+
+	if (!(vif->bss_conf.assoc_capability & WLAN_CAPABILITY_PRIVACY))
+		return true;
+
+	sta_priv = wcn36xx_sta_to_priv(sta);
+
+	return sta_priv->is_data_encrypted;
+}
+
 static void wcn36xx_smd_set_bss_ht_params(struct ieee80211_vif *vif,
 		struct ieee80211_sta *sta,
 		struct wcn36xx_hal_config_bss_params *bss_params)
 {
+	if (sta && !wcn36xx_peer_ht_allowed(vif, sta))
+		return;
+
 	if (sta && sta->deflink.ht_cap.ht_supported) {
 		unsigned long caps = sta->deflink.ht_cap.cap;
 
@@ -256,9 +288,13 @@ wcn36xx_smd_set_bss_vht_params(struct ieee80211_vif *vif,
 		bss->vht_capable = 1;
 }
 
-static void wcn36xx_smd_set_sta_ht_params(struct ieee80211_sta *sta,
-		struct wcn36xx_hal_config_sta_params *sta_params)
+static void wcn36xx_smd_set_sta_ht_params(struct ieee80211_vif *vif,
+					  struct ieee80211_sta *sta,
+					  struct wcn36xx_hal_config_sta_params *sta_params)
 {
+	if (!wcn36xx_peer_ht_allowed(vif, sta))
+		return;
+
 	if (sta->deflink.ht_cap.ht_supported) {
 		unsigned long caps = sta->deflink.ht_cap.cap;
 
@@ -409,7 +445,7 @@ static void wcn36xx_smd_set_sta_params(struct wcn36xx *wcn,
 		sta_params->wmm_enabled = sta->wme;
 		sta_params->max_sp_len = sta->max_sp;
 		sta_params->aid = sta_priv->aid;
-		wcn36xx_smd_set_sta_ht_params(sta, sta_params);
+		wcn36xx_smd_set_sta_ht_params(vif, sta, sta_params);
 		memcpy(&sta_params->supported_rates, &sta_priv->supported_rates,
 			sizeof(struct wcn36xx_hal_supported_rates));
 	} else {

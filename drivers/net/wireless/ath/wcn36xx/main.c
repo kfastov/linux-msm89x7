@@ -37,6 +37,37 @@ static bool disable_ht;
 module_param(disable_ht, bool, 0444);
 MODULE_PARM_DESC(disable_ht, "Disable 802.11n (HT) support");
 
+/*
+ * The firmware does not deliver unencrypted data frames to a peer that has been
+ * configured as HT capable, which stalls the WPA 4-way handshake.  Keep the peer
+ * non-HT until the pairwise key is installed - by then every data frame going to
+ * it is encrypted - and reconfigure it with HT afterwards.
+ */
+bool wcn36xx_defer_peer_ht = true;
+module_param_named(defer_peer_ht, wcn36xx_defer_peer_ht, bool, 0644);
+MODULE_PARM_DESC(defer_peer_ht,
+		 "Delay HT peer configuration until the pairwise key is set");
+
+/*
+ * A-MPDU is the other thing that changes on the air once a peer is HT.  Give it
+ * its own switch so the two can be told apart on hardware where HT data
+ * transfer misbehaves.
+ */
+static bool disable_ampdu;
+module_param(disable_ampdu, bool, 0644);
+MODULE_PARM_DESC(disable_ampdu, "Refuse A-MPDU block ack sessions");
+
+/*
+ * Mask applied to the single-stream HT MCS set, both in what is advertised to
+ * the AP and in what the peer configuration hands the firmware.  A radio whose
+ * transmitter has poor error vector magnitude carries BPSK and QPSK fine and
+ * loses 16/64-QAM, so capping the set separates a bad transmitter from a bad
+ * HT implementation.  0xff is every rate, i.e. no change.
+ */
+static u8 ht_mcs_mask = 0xff;
+module_param(ht_mcs_mask, byte, 0444);
+MODULE_PARM_DESC(ht_mcs_mask, "Bit mask of usable HT MCS 0-7 (default 0xff)");
+
 #define CHAN2G(_freq, _idx) { \
 	.band = NL80211_BAND_2GHZ, \
 	.center_freq = (_freq), \
@@ -755,6 +786,7 @@ static void wcn36xx_update_allowed_rates(struct ieee80211_sta *sta,
 		memcpy(sta_priv->supported_rates.supported_mcs_set,
 		       sta->deflink.ht_cap.mcs.rx_mask,
 		       sizeof(sta->deflink.ht_cap.mcs.rx_mask));
+		sta_priv->supported_rates.supported_mcs_set[0] &= ht_mcs_mask;
 	}
 
 	if (sta->deflink.vht_cap.vht_supported) {
@@ -1194,6 +1226,9 @@ static int wcn36xx_ampdu_action(struct ieee80211_hw *hw,
 	wcn36xx_dbg(WCN36XX_DBG_MAC, "mac ampdu action action %d tid %d\n",
 		    action, tid);
 
+	if (disable_ampdu)
+		return -EOPNOTSUPP;
+
 	mutex_lock(&wcn->conf_mutex);
 
 	switch (action) {
@@ -1433,8 +1468,11 @@ static int wcn36xx_init_ieee80211(struct wcn36xx *wcn)
 		wcn_band_5ghz.ht_cap.ht_supported = false;
 	}
 
+	wcn_band_2ghz.ht_cap.mcs.rx_mask[0] &= ht_mcs_mask;
+	wcn_band_5ghz.ht_cap.mcs.rx_mask[0] &= ht_mcs_mask;
+
 	ieee80211_hw_set(wcn->hw, TIMING_BEACON_ONLY);
-	if (!disable_ht)
+	if (!disable_ht && !disable_ampdu)
 		ieee80211_hw_set(wcn->hw, AMPDU_AGGREGATION);
 	ieee80211_hw_set(wcn->hw, SUPPORTS_PS);
 	ieee80211_hw_set(wcn->hw, SIGNAL_DBM);
