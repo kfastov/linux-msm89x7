@@ -33,6 +33,10 @@ unsigned int wcn36xx_dbg_mask;
 module_param_named(debug_mask, wcn36xx_dbg_mask, uint, 0644);
 MODULE_PARM_DESC(debug_mask, "Debugging mask");
 
+static bool disable_ht;
+module_param(disable_ht, bool, 0444);
+MODULE_PARM_DESC(disable_ht, "Disable 802.11n (HT) support");
+
 #define CHAN2G(_freq, _idx) { \
 	.band = NL80211_BAND_2GHZ, \
 	.center_freq = (_freq), \
@@ -1424,8 +1428,14 @@ static int wcn36xx_init_ieee80211(struct wcn36xx *wcn)
 		WLAN_CIPHER_SUITE_CCMP,
 	};
 
+	if (disable_ht) {
+		wcn_band_2ghz.ht_cap.ht_supported = false;
+		wcn_band_5ghz.ht_cap.ht_supported = false;
+	}
+
 	ieee80211_hw_set(wcn->hw, TIMING_BEACON_ONLY);
-	ieee80211_hw_set(wcn->hw, AMPDU_AGGREGATION);
+	if (!disable_ht)
+		ieee80211_hw_set(wcn->hw, AMPDU_AGGREGATION);
 	ieee80211_hw_set(wcn->hw, SUPPORTS_PS);
 	ieee80211_hw_set(wcn->hw, SIGNAL_DBM);
 	ieee80211_hw_set(wcn->hw, HAS_RATE_CONTROL);
