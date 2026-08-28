@@ -130,3 +130,9 @@
 		bias-disable;
 	};
 };
+
+&edt_ft5306 {
+	status = "okay";
+};
+
+/delete-node/ &goodix_gt911;
