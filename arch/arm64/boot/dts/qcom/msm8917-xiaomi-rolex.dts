@@ -107,6 +107,70 @@
 	};
 };
 
+/*
+ * Rear camera identification probe. See the commit message: this attaches a
+ * knowingly wrong driver so that its chip-id mismatch message names which of
+ * the two candidate sensors this unit actually has.
+ */
+&cci_i2c0 {
+	rear_cam_probe: camera-sensor@10 {
+		compatible = "ovti,ov5675";
+
+		reg = <0x10>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+
+		pinctrl-0 = <&cam_sensor_rear_default>, <&camss_mclk0_default>;
+		pinctrl-names = "default";
+
+		reset-gpios = <&tlmm 36 GPIO_ACTIVE_LOW>;
+
+		avdd-supply = <&pm8937_l22>;
+		dvdd-supply = <&pm8937_l23>;
+		dovdd-supply = <&pm8937_l6>;
+		orientation = <1>;
+		rotation = <90>;
+
+		port {
+			rear_cam_ep: endpoint {
+				data-lanes = <0 1>;
+				remote-endpoint = <&csiphy0_ep>;
+				link-frequencies = /bits/ 64 <450000000>;
+			};
+		};
+	};
+};
+
+&camss {
+	ports {
+		port@0 {
+			reg = <0>;
+
+			csiphy0_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1>;
+				remote-endpoint = <&rear_cam_ep>;
+			};
+		};
+	};
+};
+
+&tlmm {
+	cam_sensor_rear_default: cam-sensor-rear-default-state {
+		pins = "gpio35", "gpio36";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_rear_reset_hog {
+		gpio-hog;
+		gpios = <35 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "cam-rear-reset-release";
+	};
+};
+
 &panel {
 	compatible = "xiaomi,rolex-panel";
 };
