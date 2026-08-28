@@ -63,6 +63,9 @@
 #define FACTORY_REGISTER_OPMODE		0x01
 #define PMOD_REGISTER_OPMODE		0xa5
 
+#define EDT_MAX_KEYS			4
+#define EDT_DEFAULT_KEY_TOLERANCE	100
+
 #define TOUCH_EVENT_DOWN		0x00
 #define TOUCH_EVENT_UP			0x01
 #define TOUCH_EVENT_ON			0x02
@@ -138,6 +141,13 @@ struct edt_ft5x06_ts_data {
 	u8 tdata_cmd;
 	int tdata_len;
 	int tdata_offset;
+
+	int key_y;
+	int key_tolerance;
+	int num_keys;
+	int key_x[EDT_MAX_KEYS];
+	unsigned int keycodes[EDT_MAX_KEYS];
+	unsigned long key_state;
 
 	char name[EDT_NAME_LEN];
 	char fw_version[EDT_NAME_LEN];
@@ -295,11 +305,98 @@ static const struct regmap_config edt_M06_i2c_regmap_config = {
 	.write = edt_M06_i2c_write,
 };
 
+/*
+ * The capacitive keys below the display are wired to the same controller and
+ * are reported as ordinary touches, at a fixed y far outside the display area
+ * (y = 2000 on a 720x1280 panel), with x identifying the key. Translate those
+ * into key events instead of feeding them to the multitouch slots.
+ */
+static void edt_ft5x06_ts_mark_key(struct edt_ft5x06_ts_data *tsdata, int x,
+				   unsigned long *keys_down)
+{
+	int best = 0, best_dist = INT_MAX, i, dist;
+
+	for (i = 0; i < tsdata->num_keys; i++) {
+		dist = abs(x - tsdata->key_x[i]);
+		if (dist < best_dist) {
+			best_dist = dist;
+			best = i;
+		}
+	}
+
+	__set_bit(best, keys_down);
+}
+
+static void edt_ft5x06_ts_report_keys(struct edt_ft5x06_ts_data *tsdata,
+				      unsigned long keys_down)
+{
+	unsigned long changed = keys_down ^ tsdata->key_state;
+	int i;
+
+	for_each_set_bit(i, &changed, tsdata->num_keys)
+		input_report_key(tsdata->input, tsdata->keycodes[i],
+				 test_bit(i, &keys_down));
+
+	tsdata->key_state = keys_down;
+}
+
+static int edt_ft5x06_ts_parse_keys(struct device *dev,
+				    struct edt_ft5x06_ts_data *tsdata)
+{
+	u32 key_x[EDT_MAX_KEYS];
+	u32 key_y, tolerance;
+	int n, i, error;
+
+	if (device_property_read_u32(dev, "touchscreen-key-y", &key_y))
+		return 0;
+
+	n = device_property_count_u32(dev, "touchscreen-key-x");
+	if (n <= 0 || n > EDT_MAX_KEYS) {
+		dev_err(dev, "touchscreen-key-y set but touchscreen-key-x is missing or too long\n");
+		return -EINVAL;
+	}
+
+	if (device_property_count_u32(dev, "linux,keycodes") != n) {
+		dev_err(dev, "linux,keycodes must have one entry per touchscreen-key-x\n");
+		return -EINVAL;
+	}
+
+	error = device_property_read_u32_array(dev, "touchscreen-key-x",
+					       key_x, n);
+	if (error)
+		return error;
+
+	error = device_property_read_u32_array(dev, "linux,keycodes",
+					       tsdata->keycodes, n);
+	if (error)
+		return error;
+
+	if (device_property_read_u32(dev, "touchscreen-key-tolerance",
+				     &tolerance))
+		tolerance = EDT_DEFAULT_KEY_TOLERANCE;
+
+	/*
+	 * Keep the geometry signed: the hot path subtracts these from touch
+	 * coordinates and takes abs(), which would misbehave on unsigned types.
+	 */
+	tsdata->key_y = key_y;
+	tsdata->key_tolerance = tolerance;
+	for (i = 0; i < n; i++)
+		tsdata->key_x[i] = key_x[i];
+
+	tsdata->num_keys = n;
+	for (i = 0; i < n; i++)
+		input_set_capability(tsdata->input, EV_KEY, tsdata->keycodes[i]);
+
+	return 0;
+}
+
 static irqreturn_t edt_ft5x06_ts_isr(int irq, void *dev_id)
 {
 	struct edt_ft5x06_ts_data *tsdata = dev_id;
 	struct device *dev = &tsdata->client->dev;
 	u8 rdbuf[63];
+	unsigned long keys_down = 0;
 	int i, type, x, y, id;
 	int error;
 
@@ -332,12 +429,22 @@ static irqreturn_t edt_ft5x06_ts_isr(int irq, void *dev_id)
 
 		id = (buf[2] >> 4) & 0x0f;
 
+		if (tsdata->num_keys &&
+		    abs(y - tsdata->key_y) <= tsdata->key_tolerance) {
+			if (type != TOUCH_EVENT_UP)
+				edt_ft5x06_ts_mark_key(tsdata, x, &keys_down);
+			continue;
+		}
+
 		input_mt_slot(tsdata->input, id);
 		if (input_mt_report_slot_state(tsdata->input, MT_TOOL_FINGER,
 					       type != TOUCH_EVENT_UP))
 			touchscreen_report_pos(tsdata->input, &tsdata->prop,
 					       x, y, true);
 	}
+
+	if (tsdata->num_keys)
+		edt_ft5x06_ts_report_keys(tsdata, keys_down);
 
 	input_mt_report_pointer_emulation(tsdata->input, true);
 	input_sync(tsdata->input);
@@ -1305,6 +1412,10 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client)
 		dev_err(&client->dev, "Unable to init MT slots.\n");
 		return error;
 	}
+
+	error = edt_ft5x06_ts_parse_keys(&client->dev, tsdata);
+	if (error)
+		return error;
 
 	irq_flags = irq_get_trigger_type(client->irq);
 	if (irq_flags == IRQF_TRIGGER_NONE)
