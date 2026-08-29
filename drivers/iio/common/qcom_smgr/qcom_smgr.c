@@ -118,6 +118,7 @@ static int qcom_smgr_request_all_sensor_info(struct qcom_smgr *smgr,
 
 	for (i = 0; i < resp.item_len; ++i) {
 		init_completion(&(*sensors)[i].sample_ready);
+		init_completion(&(*sensors)[i].sample_ready_secondary);
 		(*sensors)[i].id = resp.items[i].id;
 		(*sensors)[i].type =
 			sns_smgr_sensor_type_from_str(resp.items[i].type);
@@ -206,16 +207,26 @@ static int qcom_smgr_request_single_sensor_info(struct qcom_smgr *smgr,
 	return 0;
 }
 
+/*
+ * Report id for a sensor's secondary data type.  Sensor ids are small - 0x00,
+ * 0x0a, 0x14 and 0x28 on msm8917 - so the top bit is free to tell the two
+ * streams apart in the report indication.
+ */
+#define SMGR_SECONDARY_REPORT_ID(sensor)	((sensor)->id | 0x80)
+
 static int qcom_smgr_request_buffering(struct qcom_smgr *smgr,
 				       struct qcom_smgr_sensor *sensor,
-				       bool enable)
+				       bool enable,
+				       enum qcom_smgr_data_type data_type)
 {
+	struct qcom_smgr_data_type_item *item = &sensor->data_types[data_type];
 	struct sns_smgr_buffering_req req = {
 		/*
 		 * Reuse sensor ID as a report ID to avoid having to keep track
 		 * of a separate set of IDs
 		 */
-		.report_id = sensor->id,
+		.report_id = data_type == SNS_SMGR_DATA_TYPE_PRIMARY ?
+				sensor->id : SMGR_SECONDARY_REPORT_ID(sensor),
 		.notify_suspend_valid = false
 	};
 	struct sns_smgr_buffering_resp resp = {};
@@ -239,24 +250,23 @@ static int qcom_smgr_request_buffering(struct qcom_smgr *smgr,
 		 * report rate such that every report contains only 1 sample.
 		 * This gives us the lowest latency.
 		 */
-		if (sensor->data_types[0].native_sample_rates)
-			sample_rate = sensor->data_types[0].native_sample_rates
-					[sensor->data_types[0]
-						 .native_sample_rate_count - 1];
+		if (item->native_sample_rates)
+			sample_rate = item->native_sample_rates
+					[item->native_sample_rate_count - 1];
 
 		/*
 		 * SMGR may support a lower maximum sample rate than natively
 		 * supported by the sensor.
 		 */
-		if (sample_rate == 0 ||
-		    sample_rate > sensor->data_types[0].max_sample_rate)
-			sample_rate = sensor->data_types[0].max_sample_rate;
+		if (sample_rate == 0 || sample_rate > item->max_sample_rate)
+			sample_rate = item->max_sample_rate;
+
 
 		req.report_rate = sample_rate * SMGR_REPORT_RATE_HZ;
 
 		req.item_len = 1;
 		req.items[0].sensor_id = sensor->id;
-		req.items[0].data_type = SNS_SMGR_DATA_TYPE_PRIMARY;
+		req.items[0].data_type = data_type;
 
 		req.items[0].sampling_rate = sample_rate;
 
@@ -300,7 +310,7 @@ static int qcom_smgr_request_buffering(struct qcom_smgr *smgr,
 	}
 
 	/* Keep track of requested sample rate */
-	sensor->data_types[0].cur_sample_rate = sample_rate;
+	item->cur_sample_rate = sample_rate;
 
 	return 0;
 }
@@ -321,12 +331,22 @@ static void qcom_smgr_buffering_report_handler(struct qmi_handle *hdl,
 		sensor = &smgr->sensors[i];
 
 		/* Find sensor matching report */
-		if (sensor->id != ind->report_id)
+		if (sensor->id != ind->report_id &&
+		    SMGR_SECONDARY_REPORT_ID(sensor) != ind->report_id)
 			continue;
 
 		if (!sensor->iio_dev)
 			/* Corresponding driver was unloaded. Ignore remaining reports. */
 			return;
+
+		if (ind->report_id != sensor->id) {
+			/* Secondary data type: one-shot reads only, no buffer */
+			memcpy(sensor->last_values_secondary,
+			       ind->samples[0].values,
+			       sizeof(sensor->last_values_secondary));
+			complete(&sensor->sample_ready_secondary);
+			return;
+		}
 
 		/*
 		 * Since we are matching report rate with sample rate, we only
@@ -361,7 +381,8 @@ static int qcom_smgr_sensor_postenable(struct iio_dev *iio_dev)
 	struct qcom_smgr_iio_priv *priv = iio_priv(iio_dev);
 	struct qcom_smgr_sensor *sensor = priv->sensor;
 
-	return qcom_smgr_request_buffering(smgr, sensor, true);
+	return qcom_smgr_request_buffering(smgr, sensor, true,
+					   SNS_SMGR_DATA_TYPE_PRIMARY);
 }
 
 static int qcom_smgr_sensor_postdisable(struct iio_dev *iio_dev)
@@ -370,7 +391,8 @@ static int qcom_smgr_sensor_postdisable(struct iio_dev *iio_dev)
 	struct qcom_smgr_iio_priv *priv = iio_priv(iio_dev);
 	struct qcom_smgr_sensor *sensor = priv->sensor;
 
-	return qcom_smgr_request_buffering(smgr, sensor, false);
+	return qcom_smgr_request_buffering(smgr, sensor, false,
+					   SNS_SMGR_DATA_TYPE_PRIMARY);
 }
 
 const struct iio_buffer_setup_ops qcom_smgr_buffer_ops = {
@@ -392,27 +414,48 @@ static int qcom_smgr_iio_read_one_sample(struct iio_dev *iio_dev,
 {
 	struct qcom_smgr_iio_priv *priv = iio_priv(iio_dev);
 	struct qcom_smgr_sensor *sensor = priv->sensor;
+	enum qcom_smgr_data_type data_type;
+	struct completion *done;
+	const u32 *values;
 	struct qcom_smgr *smgr;
-	int ret;
+	int index, ret;
 
-	if (chan->scan_index < 0 ||
-	    chan->scan_index >= ARRAY_SIZE(sensor->last_values))
-		return -EINVAL;
+	/*
+	 * A sensor reports up to two quantities, as two data types.  Channels
+	 * carry the one they belong to in ->address; the primary is the default
+	 * and is what the buffer carries, and the secondary is reachable only
+	 * one sample at a time.
+	 */
+	data_type = chan->address;
+
+	if (data_type == SNS_SMGR_DATA_TYPE_SECONDARY) {
+		if (sensor->data_type_count < 2)
+			return -ENODEV;
+		done = &sensor->sample_ready_secondary;
+		values = sensor->last_values_secondary;
+		index = 0;
+	} else {
+		if (chan->scan_index < 0 ||
+		    chan->scan_index >= ARRAY_SIZE(sensor->last_values))
+			return -EINVAL;
+		done = &sensor->sample_ready;
+		values = sensor->last_values;
+		index = chan->scan_index;
+	}
 
 	smgr = dev_get_drvdata(iio_dev->dev.parent->parent);
 
 	if (!iio_device_claim_direct(iio_dev))
 		return -EBUSY;
 
-	reinit_completion(&sensor->sample_ready);
+	reinit_completion(done);
 
-	ret = qcom_smgr_request_buffering(smgr, sensor, true);
+	ret = qcom_smgr_request_buffering(smgr, sensor, true, data_type);
 	if (!ret) {
-		if (!wait_for_completion_timeout(&sensor->sample_ready,
-						 msecs_to_jiffies(1000)))
+		if (!wait_for_completion_timeout(done, msecs_to_jiffies(1000)))
 			ret = -ETIMEDOUT;
 
-		qcom_smgr_request_buffering(smgr, sensor, false);
+		qcom_smgr_request_buffering(smgr, sensor, false, data_type);
 	}
 
 	iio_device_release_direct(iio_dev);
@@ -420,7 +463,7 @@ static int qcom_smgr_iio_read_one_sample(struct iio_dev *iio_dev,
 	if (ret)
 		return ret;
 
-	*val = (s32)sensor->last_values[chan->scan_index];
+	*val = (s32)values[index];
 
 	return IIO_VAL_INT;
 }
@@ -435,10 +478,23 @@ static int qcom_smgr_iio_read_raw(struct iio_dev *iio_dev,
 	case IIO_CHAN_INFO_RAW:
 		return qcom_smgr_iio_read_one_sample(iio_dev, chan, val);
 	case IIO_CHAN_INFO_SAMP_FREQ:
-		*val = priv->sensor->data_types[0].cur_sample_rate;
+		*val = priv->sensor->data_types[chan->address].cur_sample_rate;
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
 		switch (chan->type) {
+		case IIO_TEMP:
+			/*
+			 * Reported in 1/DIVths of a degree Celsius, and IIO
+			 * wants millidegrees.
+			 */
+			*val = 1000;
+			*val2 = SMGR_VALUE_DIV;
+			return IIO_VAL_FRACTIONAL;
+		case IIO_LIGHT:
+			/* Reported like every other quantity, in 1/DIVths */
+			*val = 1;
+			*val2 = SMGR_VALUE_DIV;
+			return IIO_VAL_FRACTIONAL;
 		case IIO_PROXIMITY:
 			/*
 			 * Proximity value is reported as (SMGR_VALUE_DIV - x)/SMGR_VALUE_DIV of
@@ -470,6 +526,9 @@ static int qcom_smgr_iio_read_raw(struct iio_dev *iio_dev,
 		 * Proximity values are inverted and start from the upper bound as explained above.
 		 * No other channel types have an offset.
 		 */
+		if (chan->type != IIO_PROXIMITY)
+			return -EINVAL;
+
 		*val = priv->sensor->data_types[0].range;
 		*val2 = SMGR_VALUE_DIV;
 		return IIO_VAL_FRACTIONAL;
@@ -603,10 +662,15 @@ static int qcom_smgr_probe(struct qrtr_device *qdev)
 			smgr->sensors[i].data_types->cur_sample_rate =
 				smgr->sensors[i].data_types->max_sample_rate;
 
-			dev_dbg(smgr->dev, "0x%02x,%d: %s %s\n",
+			dev_dbg(smgr->dev,
+				"0x%02x,%d: %s %s (range %u, max %u Hz, %zu native rates)\n",
 				smgr->sensors[i].id, j,
 				smgr->sensors[i].data_types[j].vendor,
-				smgr->sensors[i].data_types[j].name);
+				smgr->sensors[i].data_types[j].name,
+				smgr->sensors[i].data_types[j].range,
+				smgr->sensors[i].data_types[j].max_sample_rate,
+				smgr->sensors[i].data_types[j]
+					.native_sample_rate_count);
 		}
 
 		qcom_smgr_register_sensor(smgr, &smgr->sensors[i]);

@@ -28,6 +28,19 @@ static const struct iio_chan_spec qcom_smgr_prox_iio_channels[] = {
 				      BIT(IIO_CHAN_INFO_SAMP_FREQ)
 	},
 	{
+		/*
+		 * Ambient light comes from the same physical part as the
+		 * proximity channel, as the sensor's secondary data type.  It
+		 * is not in the buffer - only the primary data type is - so it
+		 * is a one-shot channel with no scan index.
+		 */
+		.type = IIO_LIGHT,
+		.address = SNS_SMGR_DATA_TYPE_SECONDARY,
+		.scan_index = -1,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
+				      BIT(IIO_CHAN_INFO_SCALE),
+	},
+	{
 		.type = IIO_TIMESTAMP,
 		.channel = -1,
 		.scan_index = 3,
