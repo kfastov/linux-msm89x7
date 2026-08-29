@@ -3,6 +3,7 @@
 #ifndef __QCOM_SMGR_H__
 #define __QCOM_SMGR_H__
 
+#include <linux/completion.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/types.h>
 #include <linux/types.h>
@@ -51,6 +52,14 @@ struct qcom_smgr_sensor {
 	struct qcom_smgr_data_type_item *data_types;
 
 	struct iio_dev *iio_dev;
+
+	/*
+	 * Last sample seen in a buffering report, kept so that a one-shot
+	 * read can be answered without the caller having to drive the
+	 * buffer itself.
+	 */
+	struct completion sample_ready;
+	u32 last_values[3];
 };
 
 struct qcom_smgr_iio_priv {

@@ -24,6 +24,7 @@ static const struct iio_chan_spec qcom_smgr_gyro_iio_channels[] = {
 			.storagebits = 32,
 			.endianness = IIO_LE,
 		},
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |
 					    BIT(IIO_CHAN_INFO_SAMP_FREQ),
 		.ext_info = qcom_smgr_iio_ext_info
@@ -39,6 +40,7 @@ static const struct iio_chan_spec qcom_smgr_gyro_iio_channels[] = {
 			.storagebits = 32,
 			.endianness = IIO_LE,
 		},
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |
 					    BIT(IIO_CHAN_INFO_SAMP_FREQ),
 		.ext_info = qcom_smgr_iio_ext_info
@@ -54,6 +56,7 @@ static const struct iio_chan_spec qcom_smgr_gyro_iio_channels[] = {
 			.storagebits = 32,
 			.endianness = IIO_LE,
 		},
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |
 					    BIT(IIO_CHAN_INFO_SAMP_FREQ),
 		.ext_info = qcom_smgr_iio_ext_info
