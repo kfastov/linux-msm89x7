@@ -60,6 +60,10 @@ struct qcom_smgr_sensor {
 	 */
 	struct completion sample_ready;
 	u32 last_values[3];
+
+	/* the same, for SNS_SMGR_DATA_TYPE_SECONDARY */
+	struct completion sample_ready_secondary;
+	u32 last_values_secondary[3];
 };
 
 struct qcom_smgr_iio_priv {
