@@ -117,6 +117,7 @@ static int qcom_smgr_request_all_sensor_info(struct qcom_smgr *smgr,
 				GFP_KERNEL);
 
 	for (i = 0; i < resp.item_len; ++i) {
+		init_completion(&(*sensors)[i].sample_ready);
 		(*sensors)[i].id = resp.items[i].id;
 		(*sensors)[i].type =
 			sns_smgr_sensor_type_from_str(resp.items[i].type);
@@ -331,6 +332,10 @@ static void qcom_smgr_buffering_report_handler(struct qmi_handle *hdl,
 		 * Since we are matching report rate with sample rate, we only
 		 * get a single sample in every report.
 		 */
+		memcpy(sensor->last_values, ind->samples[0].values,
+		       sizeof(sensor->last_values));
+		complete(&sensor->sample_ready);
+
 		iio_push_to_buffers_with_timestamp(sensor->iio_dev,
 						   ind->samples[0].values,
 						   ind->metadata.timestamp);
@@ -374,6 +379,52 @@ const struct iio_buffer_setup_ops qcom_smgr_buffer_ops = {
 };
 EXPORT_SYMBOL_GPL(qcom_smgr_buffer_ops);
 
+/*
+ * SMGR only ever pushes samples, so a one-shot read has to turn buffering on,
+ * wait for the first report and turn it off again.  Without this the sensors
+ * have no _raw attributes at all, and userspace that cannot drive an IIO
+ * buffer - iio-sensor-proxy has no buffered proximity path, for one - sees
+ * nothing.
+ */
+static int qcom_smgr_iio_read_one_sample(struct iio_dev *iio_dev,
+					 struct iio_chan_spec const *chan,
+					 int *val)
+{
+	struct qcom_smgr_iio_priv *priv = iio_priv(iio_dev);
+	struct qcom_smgr_sensor *sensor = priv->sensor;
+	struct qcom_smgr *smgr;
+	int ret;
+
+	if (chan->scan_index < 0 ||
+	    chan->scan_index >= ARRAY_SIZE(sensor->last_values))
+		return -EINVAL;
+
+	smgr = dev_get_drvdata(iio_dev->dev.parent->parent);
+
+	if (!iio_device_claim_direct(iio_dev))
+		return -EBUSY;
+
+	reinit_completion(&sensor->sample_ready);
+
+	ret = qcom_smgr_request_buffering(smgr, sensor, true);
+	if (!ret) {
+		if (!wait_for_completion_timeout(&sensor->sample_ready,
+						 msecs_to_jiffies(1000)))
+			ret = -ETIMEDOUT;
+
+		qcom_smgr_request_buffering(smgr, sensor, false);
+	}
+
+	iio_device_release_direct(iio_dev);
+
+	if (ret)
+		return ret;
+
+	*val = (s32)sensor->last_values[chan->scan_index];
+
+	return IIO_VAL_INT;
+}
+
 static int qcom_smgr_iio_read_raw(struct iio_dev *iio_dev,
 				  struct iio_chan_spec const *chan, int *val,
 				  int *val2, long mask)
@@ -381,6 +432,8 @@ static int qcom_smgr_iio_read_raw(struct iio_dev *iio_dev,
 	struct qcom_smgr_iio_priv *priv = iio_priv(iio_dev);
 
 	switch (mask) {
+	case IIO_CHAN_INFO_RAW:
+		return qcom_smgr_iio_read_one_sample(iio_dev, chan, val);
 	case IIO_CHAN_INFO_SAMP_FREQ:
 		*val = priv->sensor->data_types[0].cur_sample_rate;
 		return IIO_VAL_INT;
