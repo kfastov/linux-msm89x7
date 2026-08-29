@@ -321,7 +321,24 @@ sys_get_prop_image_version(struct venus_core *core,
 	if (ret)
 		goto done;
 
-	dev_err(dev, VDBGL "error reading F/W version\n");
+	/*
+	 * Entry-level parts ship a "VE_ULT" build - a Xiaomi Redmi 4A (msm8917)
+	 * reports VIDEO.VE_ULT.3.1-00020 - which none of the patterns above
+	 * matches.
+	 */
+	ret = sscanf(img_ver, "14:VIDEO.VE_ULT.%u.%u-%u",
+		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
+	if (ret)
+		goto done;
+
+	/*
+	 * Print what was actually received: without it this says only that
+	 * something was unrecognised, and the string is the one thing needed to
+	 * add a pattern for it.  It is a fixed-size field, not necessarily
+	 * terminated, so bound the print.
+	 */
+	dev_err(dev, VDBGL "error reading F/W version: %.*s\n",
+		VER_STR_SZ, img_ver);
 	return;
 
 done:
