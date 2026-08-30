@@ -290,6 +290,12 @@ struct wcn36xx {
 	/* RF module */
 	unsigned		rf_id;
 
+	/* Last WCN36XX_HAL_DUMP_COMMAND_RSP payload, for debugfs.  The
+	 * firmware answers in text and the driver otherwise discards it.
+	 */
+	u8			dump_rsp[DUMPCMD_RSP_BUFFER];
+	size_t			dump_rsp_len;
+
 #ifdef CONFIG_WCN36XX_DEBUGFS
 	/* Debug file system entry */
 	struct wcn36xx_dfs_entry    dfs;

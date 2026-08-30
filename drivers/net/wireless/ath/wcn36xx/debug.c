@@ -132,9 +132,208 @@ static ssize_t write_file_dump(struct file *file,
 	return count;
 }
 
+static ssize_t read_file_dump(struct file *file, char __user *user_buf,
+			      size_t count, loff_t *ppos)
+{
+	struct wcn36xx *wcn = file->private_data;
+
+	if (!wcn->dump_rsp_len)
+		return 0;
+
+	return simple_read_from_buffer(user_buf, count, ppos,
+				       wcn->dump_rsp, wcn->dump_rsp_len);
+}
+
 static const struct file_operations fops_wcn36xx_dump = {
 	.open = simple_open,
 	.write =       write_file_dump,
+	.read  =       read_file_dump,
+};
+
+/*
+ * Ask the firmware which values of enum wcn36xx_hal_sys_mode it accepts in
+ * INIT_SCAN_REQ.  HAL_SYS_MODE_PROMISC is declared in hal.h and has never been
+ * sent by any published driver - in Qualcomm's prima the equivalent constant
+ * appears only inside the function that translates it - so whether this
+ * firmware implements it cannot be answered from source.
+ *
+ * wcn36xx_smd_init_scan() returns the firmware's own status word, so the answer
+ * is one number per mode.
+ *
+ * Values above the declared enum are deliberately allowed through.  A firmware
+ * that does not validate the field at all would return success for every legal
+ * mode too, and then "PROMISC accepted" would mean nothing; writing 9 is the
+ * negative control that tells the two apart.
+ *
+ *   echo 3            > sysmode_probe   enter mode 3, then leave it again
+ *   echo "3 hold"     > sysmode_probe   enter and stay, on the current channel
+ *   echo "3 hold 11"  > sysmode_probe   enter and stay, on channel 11
+ *   echo finish       > sysmode_probe   leave whatever is being held
+ *
+ * Holding a mode is what makes a behavioural test possible: a status word says
+ * the firmware accepted a request, only arriving frames say it did anything.
+ *
+ * Holding sends START_SCAN as well as INIT_SCAN, because INIT_SCAN alone was
+ * measured to do nothing at all: held in HAL_SYS_MODE_SCAN - the one mode this
+ * firmware demonstrably honours during ordinary software scans - not one
+ * foreign frame arrived.  INIT_SCAN announces an intent; START_SCAN is what
+ * acts on it.
+ *
+ * The channel defaults to the operating one, so the radio does not move and
+ * the link stays up.  Passing any other channel will take the radio off
+ * channel, which on this device means losing the route in.
+ */
+#define WCN36XX_SYSMODE_PROBE_MAX 16
+
+static const char * const wcn36xx_sys_mode_name[] = {
+	"NORMAL", "LEARN", "SCAN", "PROMISC",
+	"SUSPEND_LINK", "ROAM_SCAN", "ROAM_SUSPEND_LINK",
+};
+
+static int wcn36xx_sysmode_status[WCN36XX_SYSMODE_PROBE_MAX];
+static bool wcn36xx_sysmode_tried[WCN36XX_SYSMODE_PROBE_MAX];
+static int wcn36xx_sysmode_held = -1;
+static u8 wcn36xx_sysmode_held_ch;
+
+static struct ieee80211_vif *wcn36xx_first_vif(struct wcn36xx *wcn)
+{
+	struct ieee80211_vif *vif = NULL;
+	struct wcn36xx_vif *tmp;
+
+	mutex_lock(&wcn->conf_mutex);
+	tmp = list_first_entry_or_null(&wcn->vif_list, struct wcn36xx_vif, list);
+	if (tmp)
+		vif = wcn36xx_priv_to_vif(tmp);
+	mutex_unlock(&wcn->conf_mutex);
+
+	return vif;
+}
+
+static ssize_t write_file_sysmode_probe(struct file *file,
+					const char __user *user_buf,
+					size_t count, loff_t *ppos)
+{
+	struct wcn36xx *wcn = file->private_data;
+	struct ieee80211_vif *vif;
+	char buf[32], *p, *tok, *c;
+	bool hold;
+	u32 mode;
+	u8 ch = 0;
+	int ret;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+	memset(buf, 0, sizeof(buf));
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	vif = wcn36xx_first_vif(wcn);
+	if (!vif)
+		return -ENODEV;
+
+	p = strim(buf);
+
+	if (!strcmp(p, "finish")) {
+		int end;
+
+		if (wcn36xx_sysmode_held < 0)
+			return -EINVAL;
+		end = wcn36xx_smd_end_scan(wcn, wcn36xx_sysmode_held_ch);
+		ret = wcn36xx_smd_finish_scan(wcn, wcn36xx_sysmode_held, vif);
+		wcn36xx_info("sysmode_probe: released mode %d ch %u -> end %d finish %d\n",
+			     wcn36xx_sysmode_held, wcn36xx_sysmode_held_ch,
+			     end, ret);
+		wcn36xx_sysmode_held = -1;
+		return count;
+	}
+
+	if (wcn36xx_sysmode_held >= 0) {
+		wcn36xx_warn("sysmode_probe: mode %d still held, write finish first\n",
+			     wcn36xx_sysmode_held);
+		return -EBUSY;
+	}
+
+	tok = strsep(&p, " \t");
+	if (!tok || kstrtou32(tok, 0, &mode))
+		return -EINVAL;
+	if (mode >= WCN36XX_SYSMODE_PROBE_MAX)
+		return -ERANGE;
+	hold = p && strstr(p, "hold");
+	if (hold) {
+		c = strstr(p, "hold") + 4;
+		while (*c == ' ' || *c == '\t')
+			c++;
+		if (!*c || kstrtou8(c, 0, &ch))
+			ch = 0;
+	}
+	if (!ch)
+		ch = WCN36XX_HW_CHANNEL(wcn);
+
+	if (wcn->sw_scan || wcn->sw_scan_init) {
+		wcn36xx_warn("sysmode_probe: a scan is in progress\n");
+		return -EBUSY;
+	}
+
+	ret = wcn36xx_smd_init_scan(wcn, mode, vif);
+	wcn36xx_sysmode_status[mode] = ret;
+	wcn36xx_sysmode_tried[mode] = true;
+	wcn36xx_info("sysmode_probe: mode %u -> %d%s\n", mode, ret,
+		     (!ret && hold) ? " (held)" : "");
+
+	if (!ret) {
+		if (hold) {
+			int start = wcn36xx_smd_start_scan(wcn, ch);
+
+			wcn36xx_info("sysmode_probe: start_scan ch %u -> %d\n",
+				     ch, start);
+			wcn36xx_sysmode_held = mode;
+			wcn36xx_sysmode_held_ch = ch;
+		} else {
+			wcn36xx_smd_finish_scan(wcn, mode, vif);
+		}
+	}
+
+	return count;
+}
+
+static ssize_t read_file_sysmode_probe(struct file *file, char __user *user_buf,
+				       size_t count, loff_t *ppos)
+{
+	char buf[1024];
+	size_t len = 0;
+	int i;
+
+	len += scnprintf(buf + len, sizeof(buf) - len,
+			 "mode  name                   status\n");
+	for (i = 0; i < WCN36XX_SYSMODE_PROBE_MAX; i++) {
+		const char *name;
+
+		if (!wcn36xx_sysmode_tried[i])
+			continue;
+
+		name = i < ARRAY_SIZE(wcn36xx_sys_mode_name) ?
+			wcn36xx_sys_mode_name[i] : "(not a declared mode)";
+
+		len += scnprintf(buf + len, sizeof(buf) - len,
+				 "%4d  %-21s  %4d  %s%s\n", i, name,
+				 wcn36xx_sysmode_status[i],
+				 wcn36xx_sysmode_status[i] ? "refused" : "accepted",
+				 i == wcn36xx_sysmode_held ? "  [HELD]" : "");
+	}
+	if (wcn36xx_sysmode_held >= 0)
+		len += scnprintf(buf + len, sizeof(buf) - len,
+				 "held on channel %u\n", wcn36xx_sysmode_held_ch);
+	if (len < 60)
+		len += scnprintf(buf + len, sizeof(buf) - len,
+				 "  (nothing tried yet)\n");
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static const struct file_operations fops_wcn36xx_sysmode_probe = {
+	.open  = simple_open,
+	.write = write_file_sysmode_probe,
+	.read  = read_file_sysmode_probe,
 };
 
 static ssize_t read_file_firmware_feature_caps(struct file *file,
@@ -199,9 +398,10 @@ void wcn36xx_debugfs_init(struct wcn36xx *wcn)
 	}
 
 	ADD_FILE(bmps_switcher, 0600, &fops_wcn36xx_bmps, wcn);
-	ADD_FILE(dump, 0200, &fops_wcn36xx_dump, wcn);
+	ADD_FILE(dump, 0600, &fops_wcn36xx_dump, wcn);
 	ADD_FILE(firmware_feat_caps, 0200,
 		 &fops_wcn36xx_firmware_feat_caps, wcn);
+	ADD_FILE(sysmode_probe, 0600, &fops_wcn36xx_sysmode_probe, wcn);
 }
 
 void wcn36xx_debugfs_exit(struct wcn36xx *wcn)

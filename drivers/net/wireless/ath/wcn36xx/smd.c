@@ -2380,6 +2380,7 @@ int wcn36xx_smd_dump_cmd_req(struct wcn36xx *wcn, u32 arg1, u32 arg2,
 			     u32 arg3, u32 arg4, u32 arg5)
 {
 	struct wcn36xx_hal_dump_cmd_req_msg msg_body;
+	struct wcn36xx_hal_dump_cmd_rsp_msg *rsp;
 	int ret;
 
 	mutex_lock(&wcn->hal_mutex);
@@ -2402,6 +2403,17 @@ int wcn36xx_smd_dump_cmd_req(struct wcn36xx *wcn, u32 arg1, u32 arg2,
 	if (ret) {
 		wcn36xx_err("hal_dump_cmd response failed err=%d\n", ret);
 		goto out;
+	}
+
+	/* The firmware answers in text.  Keep it for debugfs instead of
+	 * dropping it on the floor.
+	 */
+	wcn->dump_rsp_len = 0;
+	if (wcn->hal_rsp_len >= sizeof(*rsp) - DUMPCMD_RSP_BUFFER) {
+		rsp = (struct wcn36xx_hal_dump_cmd_rsp_msg *)wcn->hal_buf;
+		wcn->dump_rsp_len = min_t(size_t, rsp->rsp_length,
+					  DUMPCMD_RSP_BUFFER);
+		memcpy(wcn->dump_rsp, rsp->rsp_buffer, wcn->dump_rsp_len);
 	}
 out:
 	mutex_unlock(&wcn->hal_mutex);
