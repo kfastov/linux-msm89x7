@@ -336,6 +336,282 @@ static const struct file_operations fops_wcn36xx_sysmode_probe = {
 	.read  = read_file_sysmode_probe,
 };
 
+/*
+ * RXP register access over PTT, and monitor mode built on it.
+ *
+ * The receiver's filter is what stops this device seeing anyone else's data
+ * frames: foreign frames are demodulated, recognised as not-ours, pushed to a
+ * BMU work queue nothing services, and dropped.  Neither HAL_SYS_MODE_PROMISC
+ * (which this firmware does not act on) nor a held scan changes that - both
+ * were measured.  The only thing that does is the RXP configuration the factory
+ * PER test saves and overrides, and the only way to it from the host is the
+ * PTT passthrough the driver already has.
+ *
+ * Addresses came out of the firmware image; see
+ * reference/wcnss-rxp-registers.md for how, and for which of them are certain.
+ * The filter table base and stride are read straight off the instructions; the
+ * flt_disable and push_wq names are inferred from position and from the values
+ * the init routine writes.
+ *
+ * The per-entry bit encoding is NOT known - init writes 0x4000 to all 64 - so
+ * this deliberately exposes the block rather than hardcoding a guess:
+ *
+ *   cat  rxp                     dump control, flt_disable, push_wq, 64 entries
+ *   echo save    > rxp           snapshot the block
+ *   echo restore > rxp           put the snapshot back
+ *   echo "set <addr> <val>" > rxp    one register
+ *   echo "fill <val>" > rxp      write <val> to all 64 filter entries
+ *
+ * Everything is reversible as long as a snapshot was taken first, and a reboot
+ * restores the lot regardless.
+ */
+
+#define WCN36XX_RXP_CONTROL	0x0a080800
+#define WCN36XX_RXP_MAX_PKTLEN	0x0a080848
+#define WCN36XX_RXP_FLT_DISABLE0 0x0a0808f0
+#define WCN36XX_RXP_FLT_DISABLE1 0x0a0808f4
+#define WCN36XX_RXP_FILTER_BASE	0x0a080900
+#define WCN36XX_RXP_FILTER_N	64
+#define WCN36XX_RXP_PUSH_WQ_CTRL 0x0a080b14
+#define WCN36XX_RXP_PUSH_WQ_CTRL2 0x0a080b18
+
+#define PTT_MSG_DBG_READ_REGISTER	0x3040
+#define PTT_MSG_DBG_WRITE_REGISTER	0x3041
+
+struct wcn36xx_ptt_reg {
+	u16 msg_id;
+	u16 msg_body_length;
+	u32 resp_status;
+	u32 addr;
+	u32 value;
+} __packed;
+
+static int wcn36xx_ptt_reg_op(struct wcn36xx *wcn, struct ieee80211_vif *vif,
+			      u16 op, u32 addr, u32 *value)
+{
+	struct wcn36xx_ptt_reg msg = {
+		.msg_id = op,
+		.msg_body_length = sizeof(msg),
+		.addr = addr,
+		.value = (op == PTT_MSG_DBG_WRITE_REGISTER) ? *value : 0,
+	};
+	struct wcn36xx_ptt_reg *rsp = NULL;
+	int ret;
+
+	ret = wcn36xx_smd_process_ptt_msg(wcn, vif, &msg, sizeof(msg),
+					  (void **)&rsp);
+	if (ret)
+		return ret;
+	if (!rsp)
+		return -EIO;
+
+	/* The firmware's own status word.  A bad address comes back as
+	 * 0xFFFFFFBE rather than as silence, which is what makes this usable.
+	 */
+	if (rsp->resp_status) {
+		wcn36xx_warn("rxp: reg 0x%08x refused, status 0x%08x\n",
+			     addr, rsp->resp_status);
+		ret = -EIO;
+	} else if (op == PTT_MSG_DBG_READ_REGISTER) {
+		*value = rsp->value;
+	}
+
+	kfree(rsp);
+	return ret;
+}
+
+static int wcn36xx_rxp_read(struct wcn36xx *wcn, struct ieee80211_vif *vif,
+			    u32 addr, u32 *value)
+{
+	return wcn36xx_ptt_reg_op(wcn, vif, PTT_MSG_DBG_READ_REGISTER, addr,
+				  value);
+}
+
+static int wcn36xx_rxp_write(struct wcn36xx *wcn, struct ieee80211_vif *vif,
+			     u32 addr, u32 value)
+{
+	return wcn36xx_ptt_reg_op(wcn, vif, PTT_MSG_DBG_WRITE_REGISTER, addr,
+				  &value);
+}
+
+static struct {
+	bool valid;
+	u32 control;
+	u32 flt_disable[2];
+	u32 push_wq[2];
+	u32 filter[WCN36XX_RXP_FILTER_N];
+} wcn36xx_rxp_saved;
+
+static int wcn36xx_rxp_snapshot(struct wcn36xx *wcn, struct ieee80211_vif *vif)
+{
+	int i, ret;
+
+	ret = wcn36xx_rxp_read(wcn, vif, WCN36XX_RXP_CONTROL,
+			       &wcn36xx_rxp_saved.control);
+	if (ret)
+		return ret;
+	ret = wcn36xx_rxp_read(wcn, vif, WCN36XX_RXP_FLT_DISABLE0,
+			       &wcn36xx_rxp_saved.flt_disable[0]) ?:
+	      wcn36xx_rxp_read(wcn, vif, WCN36XX_RXP_FLT_DISABLE1,
+			       &wcn36xx_rxp_saved.flt_disable[1]) ?:
+	      wcn36xx_rxp_read(wcn, vif, WCN36XX_RXP_PUSH_WQ_CTRL,
+			       &wcn36xx_rxp_saved.push_wq[0]) ?:
+	      wcn36xx_rxp_read(wcn, vif, WCN36XX_RXP_PUSH_WQ_CTRL2,
+			       &wcn36xx_rxp_saved.push_wq[1]);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < WCN36XX_RXP_FILTER_N; i++) {
+		ret = wcn36xx_rxp_read(wcn, vif,
+				       WCN36XX_RXP_FILTER_BASE + i * 4,
+				       &wcn36xx_rxp_saved.filter[i]);
+		if (ret)
+			return ret;
+	}
+
+	wcn36xx_rxp_saved.valid = true;
+	wcn36xx_info("rxp: snapshot taken\n");
+	return 0;
+}
+
+static int wcn36xx_rxp_restore(struct wcn36xx *wcn, struct ieee80211_vif *vif)
+{
+	int i, ret = 0;
+
+	if (!wcn36xx_rxp_saved.valid)
+		return -ENODATA;
+
+	for (i = 0; i < WCN36XX_RXP_FILTER_N; i++)
+		ret |= wcn36xx_rxp_write(wcn, vif,
+					 WCN36XX_RXP_FILTER_BASE + i * 4,
+					 wcn36xx_rxp_saved.filter[i]);
+	ret |= wcn36xx_rxp_write(wcn, vif, WCN36XX_RXP_PUSH_WQ_CTRL,
+				 wcn36xx_rxp_saved.push_wq[0]);
+	ret |= wcn36xx_rxp_write(wcn, vif, WCN36XX_RXP_PUSH_WQ_CTRL2,
+				 wcn36xx_rxp_saved.push_wq[1]);
+	ret |= wcn36xx_rxp_write(wcn, vif, WCN36XX_RXP_FLT_DISABLE0,
+				 wcn36xx_rxp_saved.flt_disable[0]);
+	ret |= wcn36xx_rxp_write(wcn, vif, WCN36XX_RXP_FLT_DISABLE1,
+				 wcn36xx_rxp_saved.flt_disable[1]);
+	ret |= wcn36xx_rxp_write(wcn, vif, WCN36XX_RXP_CONTROL,
+				 wcn36xx_rxp_saved.control);
+	wcn36xx_info("rxp: restored (%d)\n", ret);
+	return ret ? -EIO : 0;
+}
+
+static ssize_t write_file_rxp(struct file *file, const char __user *user_buf,
+			      size_t count, loff_t *ppos)
+{
+	struct wcn36xx *wcn = file->private_data;
+	struct ieee80211_vif *vif;
+	char buf[64], *p;
+	u32 addr, val;
+	int i, ret;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+	memset(buf, 0, sizeof(buf));
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	vif = wcn36xx_first_vif(wcn);
+	if (!vif)
+		return -ENODEV;
+	p = strim(buf);
+
+	if (!strcmp(p, "save")) {
+		ret = wcn36xx_rxp_snapshot(wcn, vif);
+	} else if (!strcmp(p, "restore")) {
+		ret = wcn36xx_rxp_restore(wcn, vif);
+	} else if (sscanf(p, "set %i %i", &addr, &val) == 2) {
+		/* Refuse anything outside the RXP block: a wrong address does
+		 * not merely fail, it has been seen to crash the firmware into
+		 * a watchdog loop that only a reboot clears.
+		 */
+		if (addr < 0x0a080800 || addr > 0x0a080b18)
+			return -ERANGE;
+		ret = wcn36xx_rxp_write(wcn, vif, addr, val);
+	} else if (sscanf(p, "fill %i", &val) == 1) {
+		if (!wcn36xx_rxp_saved.valid) {
+			wcn36xx_warn("rxp: take a snapshot before fill\n");
+			return -EPERM;
+		}
+		ret = 0;
+		for (i = 0; i < WCN36XX_RXP_FILTER_N; i++)
+			ret |= wcn36xx_rxp_write(wcn, vif,
+						 WCN36XX_RXP_FILTER_BASE + i * 4,
+						 val);
+		ret = ret ? -EIO : 0;
+	} else {
+		return -EINVAL;
+	}
+
+	return ret ? ret : count;
+}
+
+static ssize_t read_file_rxp(struct file *file, char __user *user_buf,
+			     size_t count, loff_t *ppos)
+{
+	struct wcn36xx *wcn = file->private_data;
+	struct ieee80211_vif *vif;
+	char *buf;
+	size_t len = 0, sz = 4096;
+	u32 v;
+	int i;
+
+	vif = wcn36xx_first_vif(wcn);
+	if (!vif)
+		return -ENODEV;
+
+	buf = kzalloc(sz, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+#define RXP_SHOW(name, addr)						\
+	do {								\
+		if (wcn36xx_rxp_read(wcn, vif, (addr), &v))		\
+			len += scnprintf(buf + len, sz - len,		\
+					 "%-14s 0x%08x  refused\n",	\
+					 (name), (addr));		\
+		else							\
+			len += scnprintf(buf + len, sz - len,		\
+					 "%-14s 0x%08x  0x%08x\n",	\
+					 (name), (addr), v);		\
+	} while (0)
+
+	RXP_SHOW("control", WCN36XX_RXP_CONTROL);
+	RXP_SHOW("max_pktlen", WCN36XX_RXP_MAX_PKTLEN);
+	RXP_SHOW("flt_disable0", WCN36XX_RXP_FLT_DISABLE0);
+	RXP_SHOW("flt_disable1", WCN36XX_RXP_FLT_DISABLE1);
+	RXP_SHOW("push_wq_ctrl", WCN36XX_RXP_PUSH_WQ_CTRL);
+	RXP_SHOW("push_wq_ctrl2", WCN36XX_RXP_PUSH_WQ_CTRL2);
+#undef RXP_SHOW
+
+	len += scnprintf(buf + len, sz - len, "\nfilter table @ 0x%08x:\n",
+			 WCN36XX_RXP_FILTER_BASE);
+	for (i = 0; i < WCN36XX_RXP_FILTER_N; i++) {
+		if (wcn36xx_rxp_read(wcn, vif,
+				     WCN36XX_RXP_FILTER_BASE + i * 4, &v))
+			break;
+		len += scnprintf(buf + len, sz - len, "%s%02d:%08x",
+				 (i % 4) ? "  " : "", i, v);
+		if (i % 4 == 3)
+			len += scnprintf(buf + len, sz - len, "\n");
+	}
+	len += scnprintf(buf + len, sz - len, "\nsnapshot: %s\n",
+			 wcn36xx_rxp_saved.valid ? "held" : "none");
+
+	i = simple_read_from_buffer(user_buf, count, ppos, buf, len);
+	kfree(buf);
+	return i;
+}
+
+static const struct file_operations fops_wcn36xx_rxp = {
+	.open  = simple_open,
+	.write = write_file_rxp,
+	.read  = read_file_rxp,
+};
+
 static ssize_t read_file_firmware_feature_caps(struct file *file,
 					       char __user *user_buf,
 					       size_t count, loff_t *ppos)
@@ -402,6 +678,7 @@ void wcn36xx_debugfs_init(struct wcn36xx *wcn)
 	ADD_FILE(firmware_feat_caps, 0200,
 		 &fops_wcn36xx_firmware_feat_caps, wcn);
 	ADD_FILE(sysmode_probe, 0600, &fops_wcn36xx_sysmode_probe, wcn);
+	ADD_FILE(rxp, 0600, &fops_wcn36xx_rxp, wcn);
 }
 
 void wcn36xx_debugfs_exit(struct wcn36xx *wcn)
