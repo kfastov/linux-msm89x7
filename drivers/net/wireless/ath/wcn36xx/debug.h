@@ -33,6 +33,7 @@ struct wcn36xx_dfs_entry {
 	struct wcn36xx_dfs_file file_dump;
 	struct wcn36xx_dfs_file file_firmware_feat_caps;
 	struct wcn36xx_dfs_file file_sysmode_probe;
+	struct wcn36xx_dfs_file file_rxp;
 };
 
 void wcn36xx_debugfs_init(struct wcn36xx *wcn);
