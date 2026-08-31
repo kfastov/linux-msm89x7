@@ -2416,6 +2416,31 @@ out:
 	return ret;
 }
 
+int wcn36xx_smd_mac_spoofed_scan(struct wcn36xx *wcn, const u8 *mac)
+{
+	struct wcn36xx_hal_mac_spoofed_scan_req_msg msg_body;
+	int ret;
+
+	mutex_lock(&wcn->hal_mutex);
+	INIT_HAL_MSG(msg_body, WCN36XX_HAL_MAC_SPOOFED_SCAN_REQ);
+
+	memcpy(msg_body.mac_addr, mac, ETH_ALEN);
+
+	PREPARE_HAL_BUF(wcn->hal_buf, msg_body);
+
+	ret = wcn36xx_smd_send_and_wait(wcn, msg_body.header.len);
+	if (ret) {
+		wcn36xx_err("sending mac_spoofed_scan failed\n");
+		goto out;
+	}
+	ret = wcn36xx_smd_rsp_status_check(wcn->hal_buf, wcn->hal_rsp_len);
+	if (ret)
+		wcn36xx_err("mac_spoofed_scan response failed err=%d\n", ret);
+out:
+	mutex_unlock(&wcn->hal_mutex);
+	return ret;
+}
+
 int wcn36xx_smd_dump_cmd_req(struct wcn36xx *wcn, u32 arg1, u32 arg2,
 			     u32 arg3, u32 arg4, u32 arg5)
 {
@@ -2469,6 +2494,12 @@ int wcn36xx_smd_feature_caps_exchange(struct wcn36xx *wcn)
 	INIT_HAL_MSG(msg_body, WCN36XX_HAL_FEATURE_CAPS_EXCHANGE_REQ);
 
 	wcn36xx_firmware_set_feat_caps(msg_body.feat_caps, STA_POWERSAVE);
+	/* The firmware advertises MAC_SPOOFED_SCAN, but it also checks that the
+	 * host declared it before acting on WLAN_HAL_MAC_SPOOFED_SCAN_REQ - the
+	 * vendor driver's own IS_MAC_SPOOF_SCAN_SUPPORTED_BY_HOST.  Without
+	 * this the request is simply never answered and times out.
+	 */
+	wcn36xx_firmware_set_feat_caps(msg_body.feat_caps, MAC_SPOOFED_SCAN);
 	if (wcn->rf_id == RF_IRIS_WCN3680) {
 		wcn36xx_firmware_set_feat_caps(msg_body.feat_caps, DOT11AC);
 		wcn36xx_firmware_set_feat_caps(msg_body.feat_caps, WLAN_CH144);
@@ -3358,6 +3389,7 @@ int wcn36xx_smd_rsp_process(struct rpmsg_device *rpdev,
 	case WCN36XX_HAL_SET_POWER_PARAMS_RSP:
 	case WCN36XX_HAL_EXIT_BMPS_RSP:
 	case WCN36XX_HAL_KEEP_ALIVE_RSP:
+	case WCN36XX_HAL_MAC_SPOOFED_SCAN_RSP:
 	case WCN36XX_HAL_DUMP_COMMAND_RSP:
 	case WCN36XX_HAL_ADD_BA_SESSION_RSP:
 	case WCN36XX_HAL_ADD_BA_RSP:
