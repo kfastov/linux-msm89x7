@@ -536,6 +536,15 @@ out:
  * entirely.  On a device whose only unattended route in is that link, do not
  * set this without a working USB console.
  */
+/* MAC to hand the firmware as the scanning address; see the comment in
+ * wcn36xx_smd_start_hw_scan().  Written as six bytes, e.g.
+ *   modprobe wcn36xx scan_mac=0xee,0x03,0x93,0x1b,0x67,0x1b
+ */
+static u8 scan_mac[ETH_ALEN];
+static int scan_mac_len;
+module_param_array(scan_mac, byte, &scan_mac_len, 0644);
+MODULE_PARM_DESC(scan_mac, "Address to hand the firmware as the scan MAC (six bytes)");
+
 static bool ftm;
 module_param(ftm, bool, 0444);
 MODULE_PARM_DESC(ftm, "Start the firmware in manufacturing (FTM) mode - no association, no link");
@@ -915,7 +924,18 @@ int wcn36xx_smd_start_hw_scan(struct wcn36xx *wcn, struct ieee80211_vif *vif,
 	msg_body->min_ch_time = 30;
 	msg_body->max_ch_time = 100;
 	msg_body->scan_hidden = 1;
-	memcpy(msg_body->mac, vif->addr, ETH_ALEN);
+	/* The firmware programs whatever address it is handed here into the RXP
+	 * address search table for the duration of the scan - its own debug string
+	 * for the path is "Added Spoof scan MAC address to RXP %d", and the routine
+	 * behind it is a plain add-this-MAC call.  Handing it somebody else's
+	 * address is therefore a way to ask the receiver to accept that station's
+	 * frames using a supported firmware path, rather than by writing the table
+	 * directly.
+	 */
+	if (!is_zero_ether_addr(scan_mac))
+		memcpy(msg_body->mac, scan_mac, ETH_ALEN);
+	else
+		memcpy(msg_body->mac, vif->addr, ETH_ALEN);
 	msg_body->bss_type = vif_priv->bss_type;
 	msg_body->p2p_search = vif->p2p;
 
