@@ -520,6 +520,26 @@ out:
 		memcpy(send_buf, p_msg_body, p_msg_body->header.len); \
 	} while (0)
 
+/*
+ * Start the firmware in manufacturing mode instead of production mode.
+ *
+ * Everything the factory test path offers - the Rx Frame Catcher counters, the
+ * RXP filter override, PTT_MSG_SET_CHANNEL, PTT_MSG_ENABLE_CHAINS - reads back
+ * as zero or does nothing while the firmware is in DRIVER_TYPE_PRODUCTION.
+ * That was measured three separate ways: the RXP statistics registers read 0 on
+ * a link passing traffic, PTT_MSG_GET_RX_PKT_COUNTS returns an all-zero body
+ * with status 0, and overriding the RXP filter table with the firmware's own
+ * values changes nothing.  The consistent explanation is that this machinery is
+ * only live in manufacturing mode.
+ *
+ * In this mode the firmware does not associate, so the Wi-Fi link goes away
+ * entirely.  On a device whose only unattended route in is that link, do not
+ * set this without a working USB console.
+ */
+static bool ftm;
+module_param(ftm, bool, 0444);
+MODULE_PARM_DESC(ftm, "Start the firmware in manufacturing (FTM) mode - no association, no link");
+
 static int wcn36xx_smd_rsp_status_check(void *buf, size_t len)
 {
 	struct wcn36xx_fw_msg_status_rsp *rsp;
@@ -657,7 +677,7 @@ int wcn36xx_smd_start(struct wcn36xx *wcn)
 	mutex_lock(&wcn->hal_mutex);
 	INIT_HAL_MSG(msg_body, WCN36XX_HAL_START_REQ);
 
-	msg_body.params.type = DRIVER_TYPE_PRODUCTION;
+	msg_body.params.type = ftm ? DRIVER_TYPE_MFG : DRIVER_TYPE_PRODUCTION;
 	msg_body.params.len = 0;
 
 	PREPARE_HAL_BUF(wcn->hal_buf, msg_body);
