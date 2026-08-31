@@ -379,6 +379,14 @@ enum wcn36xx_hal_host_msg_version {
 	WCN36XX_HAL_MSG_VERSION_MAX_FIELD = WCN36XX_HAL_MSG_WCNSS_CTRL_VERSION
 };
 
+/* Not in the mainline enum: prima's wlan_hal_msg.h has these, and the firmware
+ * on this part implements them.  The request programs an address that the
+ * firmware then adds to the RXP address search table for the duration of a
+ * scan - its own log line for that is "Added Spoof scan MAC address to RXP".
+ */
+#define WCN36XX_HAL_MAC_SPOOFED_SCAN_REQ	292
+#define WCN36XX_HAL_MAC_SPOOFED_SCAN_RSP	293
+
 enum driver_type {
 	DRIVER_TYPE_PRODUCTION = 0,
 	DRIVER_TYPE_MFG = 1,
@@ -4122,6 +4130,14 @@ struct wcn36xx_hal_configure_apps_cpu_wakeup_state_rsp_msg {
 	/* success or failure */
 	u32 status;
 };
+
+struct wcn36xx_hal_mac_spoofed_scan_req_msg {
+	struct wcn36xx_hal_msg_header header;
+
+	u8 mac_addr[ETH_ALEN];
+	u32 reserved1;
+	u32 reserved2;
+} __packed;
 
 struct wcn36xx_hal_dump_cmd_req_msg {
 	struct wcn36xx_hal_msg_header header;

@@ -606,6 +606,52 @@ static ssize_t read_file_rxp(struct file *file, char __user *user_buf,
 	return i;
 }
 
+/*
+ * Ask the firmware to treat an address as its scanning MAC.  The firmware adds
+ * whatever it is given here to the RXP address search table for the duration of
+ * a scan; setting it to somebody else's address is a supported way to ask the
+ * receiver to accept that station's frames.
+ *
+ *   echo ee:03:93:1b:67:1b > spoof_mac
+ *
+ * Then run a scan.  Zero the address to undo it.
+ */
+static ssize_t write_file_spoof_mac(struct file *file,
+				    const char __user *user_buf,
+				    size_t count, loff_t *ppos)
+{
+	struct wcn36xx *wcn = file->private_data;
+	unsigned int m[ETH_ALEN];
+	char buf[32];
+	u8 mac[ETH_ALEN];
+	int ret, i;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+	memset(buf, 0, sizeof(buf));
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	if (sscanf(strim(buf), "%x:%x:%x:%x:%x:%x",
+		   &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != ETH_ALEN)
+		return -EINVAL;
+	for (i = 0; i < ETH_ALEN; i++) {
+		if (m[i] > 0xff)
+			return -EINVAL;
+		mac[i] = m[i];
+	}
+
+	ret = wcn36xx_smd_mac_spoofed_scan(wcn, mac);
+	wcn36xx_info("spoof_mac: %pM -> %d\n", mac, ret);
+
+	return ret ? ret : count;
+}
+
+static const struct file_operations fops_wcn36xx_spoof_mac = {
+	.open  = simple_open,
+	.write = write_file_spoof_mac,
+};
+
 static const struct file_operations fops_wcn36xx_rxp = {
 	.open  = simple_open,
 	.write = write_file_rxp,
@@ -679,6 +725,7 @@ void wcn36xx_debugfs_init(struct wcn36xx *wcn)
 		 &fops_wcn36xx_firmware_feat_caps, wcn);
 	ADD_FILE(sysmode_probe, 0600, &fops_wcn36xx_sysmode_probe, wcn);
 	ADD_FILE(rxp, 0600, &fops_wcn36xx_rxp, wcn);
+	ADD_FILE(spoof_mac, 0200, &fops_wcn36xx_spoof_mac, wcn);
 }
 
 void wcn36xx_debugfs_exit(struct wcn36xx *wcn)
