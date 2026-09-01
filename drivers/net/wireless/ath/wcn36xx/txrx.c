@@ -523,12 +523,12 @@ out_unlock:
 	spin_unlock(&sta_priv->ampdu_lock);
 }
 
-static void wcn36xx_set_tx_data(struct wcn36xx_tx_bd *bd,
-				struct wcn36xx *wcn,
-				struct wcn36xx_vif **vif_priv,
-				struct wcn36xx_sta *sta_priv,
-				struct sk_buff *skb,
-				bool bcast)
+static int wcn36xx_set_tx_data(struct wcn36xx_tx_bd *bd,
+			       struct wcn36xx *wcn,
+			       struct wcn36xx_vif **vif_priv,
+			       struct wcn36xx_sta *sta_priv,
+			       struct sk_buff *skb,
+			       bool bcast)
 {
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
@@ -559,6 +559,8 @@ static void wcn36xx_set_tx_data(struct wcn36xx_tx_bd *bd,
 		}
 	} else {
 		__vif_priv = get_vif_by_addr(wcn, hdr->addr2);
+		if (!__vif_priv)
+			return -ENOENT;
 		bd->sta_index = __vif_priv->self_sta_index;
 		bd->dpu_desc_idx = __vif_priv->self_dpu_desc_index;
 		bd->dpu_sign = __vif_priv->self_ucast_dpu_sign;
@@ -600,17 +602,23 @@ static void wcn36xx_set_tx_data(struct wcn36xx_tx_bd *bd,
 
 	if (sta_priv && is_data_qos)
 		wcn36xx_tx_start_ampdu(wcn, sta_priv, skb);
+
+	return 0;
 }
 
-static void wcn36xx_set_tx_mgmt(struct wcn36xx_tx_bd *bd,
-				struct wcn36xx *wcn,
-				struct wcn36xx_vif **vif_priv,
-				struct sk_buff *skb,
-				bool bcast)
+static int wcn36xx_set_tx_mgmt(struct wcn36xx_tx_bd *bd,
+			       struct wcn36xx *wcn,
+			       struct wcn36xx_vif **vif_priv,
+			       struct sk_buff *skb,
+			       bool bcast)
 {
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
 	struct wcn36xx_vif *__vif_priv =
 		get_vif_by_addr(wcn, hdr->addr2);
+
+	if (!__vif_priv)
+		return -ENOENT;
+
 	bd->sta_index = __vif_priv->self_sta_index;
 	bd->dpu_desc_idx = __vif_priv->self_dpu_desc_index;
 	bd->dpu_ne = 1;
@@ -650,6 +658,8 @@ static void wcn36xx_set_tx_mgmt(struct wcn36xx_tx_bd *bd,
 			   sizeof(struct ieee80211_qos_hdr) :
 			   sizeof(struct ieee80211_hdr_3addr),
 			   skb->len, WCN36XX_TID);
+
+	return 0;
 }
 
 int wcn36xx_start_tx(struct wcn36xx *wcn,
@@ -693,10 +703,22 @@ int wcn36xx_start_tx(struct wcn36xx *wcn,
 
 	/* Data frames served first*/
 	if (is_low)
-		wcn36xx_set_tx_data(&bd, wcn, &vif_priv, sta_priv, skb, bcast);
+		ret = wcn36xx_set_tx_data(&bd, wcn, &vif_priv, sta_priv, skb,
+					  bcast);
 	else
 		/* MGMT and CTRL frames are handeld here*/
-		wcn36xx_set_tx_mgmt(&bd, wcn, &vif_priv, skb, bcast);
+		ret = wcn36xx_set_tx_mgmt(&bd, wcn, &vif_priv, skb, bcast);
+
+	/* No interface owns this address.  Anything injected on a monitor
+	 * interface lands here, and the two setters above used to dereference
+	 * the NULL that get_vif_by_addr() had already warned about - one
+	 * injected frame was enough to take the whole phone down.
+	 */
+	if (ret) {
+		if (unlikely(ack_ind))
+			ieee80211_wake_queues(wcn->hw);
+		return ret;
+	}
 
 	buff_to_be(&bd, sizeof(bd)/sizeof(u32));
 	bd.tx_bd_sign = 0xbdbdbdbd;
