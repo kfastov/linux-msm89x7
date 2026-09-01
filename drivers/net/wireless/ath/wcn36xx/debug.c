@@ -647,6 +647,68 @@ static ssize_t write_file_spoof_mac(struct file *file,
 	return ret ? ret : count;
 }
 
+/*
+ * Turn the firmware's own monitor mode on and off without going through a
+ * netdev, so an experiment on the only route into this phone can be run and
+ * undone from one script.
+ *
+ *   echo 11  > monitor      # on, channel 11
+ *   echo off > monitor      # off
+ *
+ * Frames arrive on any mac80211 monitor interface that is already up; the
+ * driver's receive path does not filter by address, so nothing else is needed
+ * on this side.
+ */
+static ssize_t write_file_monitor(struct file *file,
+				  const char __user *user_buf,
+				  size_t count, loff_t *ppos)
+{
+	struct wcn36xx *wcn = file->private_data;
+	char buf[16];
+	int ret, ch;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+	memset(buf, 0, sizeof(buf));
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	mutex_lock(&wcn->conf_mutex);
+	if (!strcmp(strim(buf), "off") || !strcmp(strim(buf), "0")) {
+		wcn36xx_monitor_stop(wcn);
+		ret = 0;
+	} else if (kstrtoint(strim(buf), 0, &ch) == 0) {
+		ret = wcn36xx_monitor_start(wcn, ch);
+	} else {
+		ret = -EINVAL;
+	}
+	mutex_unlock(&wcn->conf_mutex);
+
+	return ret ? ret : count;
+}
+
+static ssize_t read_file_monitor(struct file *file, char __user *user_buf,
+				 size_t count, loff_t *ppos)
+{
+	struct wcn36xx *wcn = file->private_data;
+	char buf[32];
+	int len;
+
+	if (wcn->monitor_on)
+		len = scnprintf(buf, sizeof(buf), "on channel %d\n",
+				wcn->monitor_channel);
+	else
+		len = scnprintf(buf, sizeof(buf), "off\n");
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static const struct file_operations fops_wcn36xx_monitor = {
+	.open  = simple_open,
+	.write = write_file_monitor,
+	.read  = read_file_monitor,
+};
+
 static const struct file_operations fops_wcn36xx_spoof_mac = {
 	.open  = simple_open,
 	.write = write_file_spoof_mac,
@@ -726,6 +788,7 @@ void wcn36xx_debugfs_init(struct wcn36xx *wcn)
 	ADD_FILE(sysmode_probe, 0600, &fops_wcn36xx_sysmode_probe, wcn);
 	ADD_FILE(rxp, 0600, &fops_wcn36xx_rxp, wcn);
 	ADD_FILE(spoof_mac, 0200, &fops_wcn36xx_spoof_mac, wcn);
+	ADD_FILE(monitor, 0600, &fops_wcn36xx_monitor, wcn);
 }
 
 void wcn36xx_debugfs_exit(struct wcn36xx *wcn)

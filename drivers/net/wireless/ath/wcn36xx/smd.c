@@ -2416,6 +2416,92 @@ out:
 	return ret;
 }
 
+/* One bit per frame type/subtype, indexed type << 4 | subtype, exactly as the
+ * RXP frame-type filter table is.  Everything by default: a monitor that
+ * silently drops ACK and CTS is a worse monitor, and carrying them costs
+ * almost nothing here - measured at 102 control frames in ten seconds on a
+ * live channel, against 7 jiffies of softirq and 88% idle.  The parameter is
+ * for shedding types deliberately, not for protecting the host.
+ */
+static unsigned long long monitor_types = ~0ULL;
+module_param(monitor_types, ullong, 0644);
+MODULE_PARM_DESC(monitor_types,
+		 "monitor mode frame type/subtype bitmap, type << 4 | subtype (default: every type)");
+
+/* Ask the firmware for its own monitor mode.
+ *
+ * With no MAC filters the firmware points both the default and the
+ * unknown-address receive work queues at queue 11, clears the address-compare
+ * bits in the RXP control register, and rewrites all 64 frame-type filter
+ * entries from its monitor table - which is the whole of what the address
+ * match was blocking.  Everything else in the request is a bound the receiver
+ * should apply, and the firmware clamps each one itself.
+ */
+int wcn36xx_smd_enable_monitor_mode(struct wcn36xx *wcn, u8 channel)
+{
+	struct wcn36xx_hal_enable_monitor_mode_req_msg msg_body;
+	int ret;
+
+	mutex_lock(&wcn->hal_mutex);
+	INIT_HAL_MSG(msg_body, WCN36XX_HAL_ENABLE_MONITOR_MODE_REQ);
+
+	msg_body.channel = channel;
+	msg_body.cb_state = PHY_SINGLE_CHANNEL_CENTERED;
+	msg_body.max_ampdu_len = 0x1ffff;
+	msg_body.max_mpdu_in_ampdu_len = 0xed4;
+	/* Keep the hardware FCS check; a monitor that reports corrupt frames as
+	 * good is worse than one that drops them.
+	 */
+	msg_body.crc_check_enabled = 1;
+	/* Zero filters is the point: it is what makes the firmware deliver
+	 * frames addressed to anybody.
+	 */
+	msg_body.num_mac_filters = 0;
+	/* The firmware writes the complement of this into the two
+	 * filter-disable registers, so a set bit is a type to accept.
+	 */
+	msg_body.type_subtype_bitmap = monitor_types;
+
+	PREPARE_HAL_BUF(wcn->hal_buf, msg_body);
+
+	ret = wcn36xx_smd_send_and_wait(wcn, msg_body.header.len);
+	if (ret) {
+		wcn36xx_err("sending enable_monitor_mode failed\n");
+		goto out;
+	}
+	ret = wcn36xx_smd_rsp_status_check(wcn->hal_buf, wcn->hal_rsp_len);
+	if (ret)
+		wcn36xx_err("enable_monitor_mode response failed err=%d\n",
+			    ret);
+out:
+	mutex_unlock(&wcn->hal_mutex);
+	return ret;
+}
+
+int wcn36xx_smd_disable_monitor_mode(struct wcn36xx *wcn)
+{
+	struct wcn36xx_hal_disable_monitor_mode_req_msg msg_body;
+	int ret;
+
+	mutex_lock(&wcn->hal_mutex);
+	INIT_HAL_MSG(msg_body, WCN36XX_HAL_DISABLE_MONITOR_MODE_REQ);
+
+	PREPARE_HAL_BUF(wcn->hal_buf, msg_body);
+
+	ret = wcn36xx_smd_send_and_wait(wcn, msg_body.header.len);
+	if (ret) {
+		wcn36xx_err("sending disable_monitor_mode failed\n");
+		goto out;
+	}
+	ret = wcn36xx_smd_rsp_status_check(wcn->hal_buf, wcn->hal_rsp_len);
+	if (ret)
+		wcn36xx_err("disable_monitor_mode response failed err=%d\n",
+			    ret);
+out:
+	mutex_unlock(&wcn->hal_mutex);
+	return ret;
+}
+
 int wcn36xx_smd_mac_spoofed_scan(struct wcn36xx *wcn, const u8 *mac)
 {
 	struct wcn36xx_hal_mac_spoofed_scan_req_msg msg_body;
@@ -3390,6 +3476,8 @@ int wcn36xx_smd_rsp_process(struct rpmsg_device *rpdev,
 	case WCN36XX_HAL_EXIT_BMPS_RSP:
 	case WCN36XX_HAL_KEEP_ALIVE_RSP:
 	case WCN36XX_HAL_MAC_SPOOFED_SCAN_RSP:
+	case WCN36XX_HAL_ENABLE_MONITOR_MODE_RSP:
+	case WCN36XX_HAL_DISABLE_MONITOR_MODE_RSP:
 	case WCN36XX_HAL_DUMP_COMMAND_RSP:
 	case WCN36XX_HAL_ADD_BA_SESSION_RSP:
 	case WCN36XX_HAL_ADD_BA_RSP:
