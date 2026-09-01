@@ -285,6 +285,20 @@ struct wcn36xx {
 	struct timer_list	tx_ack_timer;
 
 	/* For A-MSDU re-aggregation */
+	/* Firmware monitor mode - WLAN_HAL_ENABLE_MONITOR_MODE_REQ.  Not the
+	 * same thing as a mac80211 monitor interface, which this driver has
+	 * always been able to carry without the receiver accepting one extra
+	 * frame.
+	 */
+	bool monitor_on;
+	/* Set only when mac80211 handed us a monitor vif.  The debugfs switch
+	 * can turn the monitor on underneath a station, which is useful as an
+	 * instrument but must not make the driver treat a scan's channel
+	 * changes as a monitor retune.
+	 */
+	bool monitor_vif;
+	u8 monitor_channel;
+
 	struct sk_buff_head amsdu;
 
 	/* RF module */
@@ -321,6 +335,8 @@ static inline bool wcn36xx_is_fw_version(struct wcn36xx *wcn,
 }
 void wcn36xx_set_default_rates(struct wcn36xx_hal_supported_rates *rates);
 void wcn36xx_set_default_rates_v1(struct wcn36xx_hal_supported_rates_v1 *rates);
+int wcn36xx_monitor_start(struct wcn36xx *wcn, int ch);
+void wcn36xx_monitor_stop(struct wcn36xx *wcn);
 
 static inline
 struct ieee80211_sta *wcn36xx_priv_to_sta(struct wcn36xx_sta *sta_priv)

@@ -387,6 +387,19 @@ enum wcn36xx_hal_host_msg_version {
 #define WCN36XX_HAL_MAC_SPOOFED_SCAN_REQ	292
 #define WCN36XX_HAL_MAC_SPOOFED_SCAN_RSP	293
 
+/* Also outside the mainline enum, and outside prima's too - prima's
+ * wlan_hal_msg.h stops at 297.  The ids were read out of the firmware's own
+ * message-name jump table (halGetHALMsgString, a two-level switch at
+ * 0x8d74051c), which numbers WLAN_HAL_MAC_SPOOFED_SCAN_REQ 292 and so checks
+ * against a value this driver already knows.  The two response ids are
+ * confirmed a second way: the handlers build their reply headers from the
+ * immediates 0x12F and 0x131.
+ */
+#define WCN36XX_HAL_ENABLE_MONITOR_MODE_REQ	302
+#define WCN36XX_HAL_ENABLE_MONITOR_MODE_RSP	303
+#define WCN36XX_HAL_DISABLE_MONITOR_MODE_REQ	304
+#define WCN36XX_HAL_DISABLE_MONITOR_MODE_RSP	305
+
 enum driver_type {
 	DRIVER_TYPE_PRODUCTION = 0,
 	DRIVER_TYPE_MFG = 1,
@@ -4130,6 +4143,51 @@ struct wcn36xx_hal_configure_apps_cpu_wakeup_state_rsp_msg {
 	/* success or failure */
 	u32 status;
 };
+
+/* One address the receiver should match, and which of the three address
+ * fields of a frame to match it against.  Only consulted when
+ * num_mac_filters is non-zero; with zero filters the receiver stops matching
+ * addresses altogether, which is what a monitor wants.
+ */
+struct wcn36xx_hal_mac_filter {
+	u8 mac_addr[ETH_ALEN];
+	u8 is_a1;
+	u8 is_a2;
+	u8 is_a3;
+} __packed;
+
+/* The layout is not in any header; it was read off the firmware's own log
+ * line, which names every field in order:
+ *
+ *   "Enable Monitor Mode channel %u cbState %u maxAmpduLen %x
+ *    maxMpduInAmpduLen %x crcNeeded %u numMacfilters %u typesubtypebitmap %llx
+ *    defaultPushWQ %u unknownAddrPushWq %u hostSentWQ %u"
+ *
+ * and against the code that parses it, which reads a fixed 40 bytes of body.
+ * The last three of those fields are firmware context rather than request
+ * fields: the firmware sets default_push_wq itself, and sets
+ * unknown_addr_push_wq to the same work queue when num_mac_filters is zero -
+ * that is the whole mechanism, since the queue address-mismatched frames are
+ * normally pushed to is one nothing services.
+ */
+struct wcn36xx_hal_enable_monitor_mode_req_msg {
+	struct wcn36xx_hal_msg_header header;
+
+	u8 channel;
+	u32 cb_state;
+	u32 max_ampdu_len;
+	u32 max_mpdu_in_ampdu_len;
+	u8 crc_check_enabled;
+	u8 num_mac_filters;
+	struct wcn36xx_hal_mac_filter mac_filter;
+	u64 type_subtype_bitmap;
+	u8 host_sent_wq;
+	u8 reserved[7];
+} __packed;
+
+struct wcn36xx_hal_disable_monitor_mode_req_msg {
+	struct wcn36xx_hal_msg_header header;
+} __packed;
 
 struct wcn36xx_hal_mac_spoofed_scan_req_msg {
 	struct wcn36xx_hal_msg_header header;

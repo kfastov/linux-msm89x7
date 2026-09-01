@@ -396,6 +396,50 @@ static void wcn36xx_change_opchannel(struct wcn36xx *wcn, int ch)
 	return;
 }
 
+/* Both of these are called with conf_mutex held. */
+int wcn36xx_monitor_start(struct wcn36xx *wcn, int ch)
+{
+	int ret;
+
+	if (ch < 1 || ch > 255)
+		return -EINVAL;
+
+	/* Retuning is a fresh request, not a second one stacked on the first.
+	 * The firmware keeps per-request state, and six ENABLEs in eleven
+	 * seconds - what a channel-hopping capture produces, two per hop,
+	 * because mac80211 passes through its default channel on the way to
+	 * each new one - stopped it dead: no oops, empty pstore, and the
+	 * watchdog took the phone down.  Pair every enable with a disable.
+	 */
+	if (wcn->monitor_on)
+		wcn36xx_smd_disable_monitor_mode(wcn);
+
+	ret = wcn36xx_smd_enable_monitor_mode(wcn, ch);
+	if (ret) {
+		wcn36xx_err("monitor mode refused on channel %d: %d\n",
+			    ch, ret);
+		return ret;
+	}
+
+	wcn->monitor_on = true;
+	wcn->monitor_channel = ch;
+	wcn36xx_info("monitor mode on, channel %d\n", ch);
+
+	return 0;
+}
+
+void wcn36xx_monitor_stop(struct wcn36xx *wcn)
+{
+	if (!wcn->monitor_on)
+		return;
+
+	wcn36xx_smd_disable_monitor_mode(wcn);
+	wcn->monitor_on = false;
+	wcn->monitor_vif = false;
+	wcn->monitor_channel = 0;
+	wcn36xx_info("monitor mode off\n");
+}
+
 static int wcn36xx_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct wcn36xx *wcn = hw->priv;
@@ -409,6 +453,17 @@ static int wcn36xx_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 		int ch = WCN36XX_HW_CHANNEL(wcn);
 		wcn36xx_dbg(WCN36XX_DBG_MAC, "wcn36xx_config channel switch=%d\n",
 			    ch);
+
+		if (wcn->monitor_on && wcn->monitor_vif) {
+			/* A monitor vif has no BSS to switch, so retune it by
+			 * re-issuing the request - the firmware sets the
+			 * channel itself as part of it.
+			 */
+			if (ch != wcn->monitor_channel)
+				wcn36xx_monitor_start(wcn, ch);
+			mutex_unlock(&wcn->conf_mutex);
+			return 0;
+		}
 
 		if (wcn->sw_scan_opchannel == ch && wcn->sw_scan_channel) {
 			/* If channel is the initial operating channel, we may
@@ -1021,6 +1076,13 @@ static void wcn36xx_remove_interface(struct ieee80211_hw *hw,
 	struct wcn36xx_vif *vif_priv = wcn36xx_vif_to_priv(vif);
 	wcn36xx_dbg(WCN36XX_DBG_MAC, "mac remove interface vif %p\n", vif);
 
+	if (vif->type == NL80211_IFTYPE_MONITOR) {
+		mutex_lock(&wcn->conf_mutex);
+		wcn36xx_monitor_stop(wcn);
+		mutex_unlock(&wcn->conf_mutex);
+		return;
+	}
+
 	mutex_lock(&wcn->conf_mutex);
 
 	list_del(&vif_priv->list);
@@ -1041,10 +1103,26 @@ static int wcn36xx_add_interface(struct ieee80211_hw *hw,
 	if (!(NL80211_IFTYPE_STATION == vif->type ||
 	      NL80211_IFTYPE_AP == vif->type ||
 	      NL80211_IFTYPE_ADHOC == vif->type ||
-	      NL80211_IFTYPE_MESH_POINT == vif->type)) {
+	      NL80211_IFTYPE_MESH_POINT == vif->type ||
+	      NL80211_IFTYPE_MONITOR == vif->type)) {
 		wcn36xx_warn("Unsupported interface type requested: %d\n",
 			     vif->type);
 		return -EOPNOTSUPP;
+	}
+
+	/* A monitor has no self-STA and no BSS; it is a mode of the receiver,
+	 * and it is exclusive - the firmware stops matching addresses, so any
+	 * association on this radio stops working until it is turned off.
+	 */
+	if (vif->type == NL80211_IFTYPE_MONITOR) {
+		int ret;
+
+		mutex_lock(&wcn->conf_mutex);
+		ret = wcn36xx_monitor_start(wcn, WCN36XX_HW_CHANNEL(wcn));
+		if (!ret)
+			wcn->monitor_vif = true;
+		mutex_unlock(&wcn->conf_mutex);
+		return ret;
 	}
 
 	mutex_lock(&wcn->conf_mutex);
@@ -1479,11 +1557,17 @@ static int wcn36xx_init_ieee80211(struct wcn36xx *wcn)
 	ieee80211_hw_set(wcn->hw, HAS_RATE_CONTROL);
 	ieee80211_hw_set(wcn->hw, SINGLE_SCAN_ON_ALL_BANDS);
 	ieee80211_hw_set(wcn->hw, REPORTS_TX_ACK_STATUS);
+	/* The hardware receive filter has to be reprogrammed for a monitor, so
+	 * the driver needs to be told when one exists rather than letting
+	 * mac80211 do it in software.
+	 */
+	ieee80211_hw_set(wcn->hw, WANT_MONITOR_VIF);
 
 	wcn->hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
 		BIT(NL80211_IFTYPE_AP) |
 		BIT(NL80211_IFTYPE_ADHOC) |
-		BIT(NL80211_IFTYPE_MESH_POINT);
+		BIT(NL80211_IFTYPE_MESH_POINT) |
+		BIT(NL80211_IFTYPE_MONITOR);
 
 	wcn->hw->wiphy->bands[NL80211_BAND_2GHZ] = &wcn_band_2ghz;
 	if (wcn->rf_id != RF_IRIS_WCN3620)

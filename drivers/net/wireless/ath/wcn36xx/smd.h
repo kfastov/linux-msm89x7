@@ -122,6 +122,8 @@ int wcn36xx_smd_keep_alive_req(struct wcn36xx *wcn,
 			       struct ieee80211_vif *vif,
 			       int packet_type);
 int wcn36xx_smd_mac_spoofed_scan(struct wcn36xx *wcn, const u8 *mac);
+int wcn36xx_smd_enable_monitor_mode(struct wcn36xx *wcn, u8 channel);
+int wcn36xx_smd_disable_monitor_mode(struct wcn36xx *wcn);
 int wcn36xx_smd_dump_cmd_req(struct wcn36xx *wcn, u32 arg1, u32 arg2,
 			     u32 arg3, u32 arg4, u32 arg5);
 int wcn36xx_smd_feature_caps_exchange(struct wcn36xx *wcn);
