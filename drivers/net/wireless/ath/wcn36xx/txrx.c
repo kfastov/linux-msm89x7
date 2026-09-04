@@ -484,7 +484,28 @@ static inline struct wcn36xx_vif *get_vif_by_addr(struct wcn36xx *wcn,
 			if (memcmp(vif->addr, addr, ETH_ALEN) == 0)
 				return vif_priv;
 	}
-	wcn36xx_warn("vif %pM not found\n", addr);
+	/* Not a warning: an injected frame on a monitor interface legitimately
+	 * carries an addr2 that belongs to no local vif, and get_monitor_vif()
+	 * handles that case in the callers.
+	 */
+	wcn36xx_dbg(WCN36XX_DBG_TX, "vif %pM not found\n", addr);
+	return NULL;
+}
+
+/* The monitor vif (if one is up) carries a self-STA registered when it was
+ * added, and that is the transmit handle an injected frame needs: its addr2 is
+ * arbitrary, so get_vif_by_addr() cannot resolve it.  Fall back to the monitor
+ * vif and transmit from its self-STA.
+ */
+static struct wcn36xx_vif *get_monitor_vif(struct wcn36xx *wcn)
+{
+	struct wcn36xx_vif *vif_priv;
+
+	list_for_each_entry(vif_priv, &wcn->vif_list, list) {
+		if (wcn36xx_priv_to_vif(vif_priv)->type ==
+		    NL80211_IFTYPE_MONITOR)
+			return vif_priv;
+	}
 	return NULL;
 }
 
@@ -558,12 +579,22 @@ static int wcn36xx_set_tx_data(struct wcn36xx_tx_bd *bd,
 			bd->dpu_desc_idx = sta_priv->dpu_desc_index;
 		}
 	} else {
+		bool injected = false;
+
 		__vif_priv = get_vif_by_addr(wcn, hdr->addr2);
+		if (!__vif_priv) {
+			/* Injected on a monitor interface. */
+			__vif_priv = get_monitor_vif(wcn);
+			injected = !!__vif_priv;
+		}
 		if (!__vif_priv)
 			return -ENOENT;
 		bd->sta_index = __vif_priv->self_sta_index;
 		bd->dpu_desc_idx = __vif_priv->self_dpu_desc_index;
 		bd->dpu_sign = __vif_priv->self_ucast_dpu_sign;
+		/* No key exists for an injected frame; send it in the clear. */
+		if (injected)
+			bd->dpu_ne = 1;
 	}
 
 	if (is_data_qos) {
@@ -616,6 +647,9 @@ static int wcn36xx_set_tx_mgmt(struct wcn36xx_tx_bd *bd,
 	struct wcn36xx_vif *__vif_priv =
 		get_vif_by_addr(wcn, hdr->addr2);
 
+	if (!__vif_priv)
+		/* Injected mgmt/ctrl frame on a monitor interface. */
+		__vif_priv = get_monitor_vif(wcn);
 	if (!__vif_priv)
 		return -ENOENT;
 

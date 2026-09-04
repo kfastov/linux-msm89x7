@@ -1078,6 +1078,11 @@ static void wcn36xx_remove_interface(struct ieee80211_hw *hw,
 
 	if (vif->type == NL80211_IFTYPE_MONITOR) {
 		mutex_lock(&wcn->conf_mutex);
+		/* Undo the self-STA registered for injection, if it took. */
+		if (!list_empty(&vif_priv->list)) {
+			list_del(&vif_priv->list);
+			wcn36xx_smd_delete_sta_self(wcn, vif->addr);
+		}
 		wcn36xx_monitor_stop(wcn);
 		mutex_unlock(&wcn->conf_mutex);
 		return;
@@ -1119,8 +1124,23 @@ static int wcn36xx_add_interface(struct ieee80211_hw *hw,
 
 		mutex_lock(&wcn->conf_mutex);
 		ret = wcn36xx_monitor_start(wcn, WCN36XX_HW_CHANNEL(wcn));
-		if (!ret)
+		if (!ret) {
 			wcn->monitor_vif = true;
+			/* Register a self-STA for the monitor vif so it can
+			 * transmit injected frames.  It is only the firmware's
+			 * TX handle and needs no BSS - the same handle the
+			 * driver already uses for its own pre-association
+			 * management frames.  The monitor vif goes on vif_list
+			 * so the transmit path can find it.
+			 */
+			vif_priv->bss_index = WCN36XX_HAL_BSS_INVALID_IDX;
+			INIT_LIST_HEAD(&vif_priv->sta_list);
+			list_add(&vif_priv->list, &wcn->vif_list);
+			if (wcn36xx_smd_add_sta_self(wcn, vif)) {
+				list_del(&vif_priv->list);
+				INIT_LIST_HEAD(&vif_priv->list);
+			}
+		}
 		mutex_unlock(&wcn->conf_mutex);
 		return ret;
 	}
